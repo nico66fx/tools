@@ -1,0 +1,169 @@
+// ═══════════════════════════════════════════════════════════════════
+// VOLATILITY HEATMAP QUANT | Pine Script v5
+// Versión : 1.0
+// Desc    : Heatmap institucional de volatilidad ATR-normalizada
+//           con filtro RSI extremo y detección de dirección EMA.
+// ═══════════════════════════════════════════════════════════════════
+
+//@version=5
+indicator(
+     title        = "Volatility Heatmap Quant",
+     shorttitle   = "VHQ",
+     overlay      = true,
+     max_bars_back = 500)
+
+// ───────────────────────────────────────────────────────────────────
+// INPUTS · ATR
+// ───────────────────────────────────────────────────────────────────
+grpATR = "⬛  ATR Settings"
+atrLen    = input.int(14,    "ATR Length",            minval=1,   maxval=200,  group=grpATR)
+atrSmooth = input.int(50,    "ATR Lookback (norm.)",  minval=10,  maxval=500,  group=grpATR)
+atrMult   = input.float(1.5, "Explosion Threshold ×", minval=0.5, maxval=5.0,  step=0.1, group=grpATR)
+
+// ───────────────────────────────────────────────────────────────────
+// INPUTS · EMA
+// ───────────────────────────────────────────────────────────────────
+grpEMA  = "📈  EMA Settings"
+emaLen  = input.int(50,   "EMA Length",    minval=1,   maxval=500, group=grpEMA)
+showEMA = input.bool(true, "Show EMA Line",             group=grpEMA)
+
+// ───────────────────────────────────────────────────────────────────
+// INPUTS · RSI FILTER
+// ───────────────────────────────────────────────────────────────────
+grpRSI  = "📊  RSI Filter"
+useRSI  = input.bool(false, "Enable RSI Extreme Filter", group=grpRSI)
+rsiLen  = input.int(14,  "RSI Length",     minval=1,  maxval=100, group=grpRSI)
+rsiOB   = input.int(65,  "RSI Overbought", minval=51, maxval=100, group=grpRSI)
+rsiOS   = input.int(35,  "RSI Oversold",   minval=0,  maxval=49,  group=grpRSI)
+
+// ───────────────────────────────────────────────────────────────────
+// INPUTS · VISUAL
+// ───────────────────────────────────────────────────────────────────
+grpVIS    = "🎨  Visual Settings"
+colBull   = input.color(color.new(#00e5cc, 0), "Bullish Color",              group=grpVIS)
+colBear   = input.color(color.new(#ff2244, 0), "Bearish Color",              group=grpVIS)
+minTransp = input.int(82, "Min Transparency (low vol)",  minval=0, maxval=99, group=grpVIS)
+maxTransp = input.int(8,  "Max Transparency (high vol)", minval=0, maxval=99, group=grpVIS)
+showSig   = input.bool(true, "Show Explosion Signals",                        group=grpVIS)
+
+// ───────────────────────────────────────────────────────────────────
+// INPUTS · ALERTS
+// ───────────────────────────────────────────────────────────────────
+grpALT       = "🔔  Alerts"
+alertOnExpl  = input.bool(true, "Alert on Volatility Explosion", group=grpALT)
+
+// ═══════════════════════════════════════════════════════════════════
+// CÁLCULOS CORE
+// ═══════════════════════════════════════════════════════════════════
+
+// ── 1. ATR raw ──────────────────────────────────────────────────
+atrRaw  = ta.atr(atrLen)
+
+// ── 2. Normalización ATR → [0, 1] vía min/max rolling ──────────
+atrHi   = ta.highest(atrRaw, atrSmooth)
+atrLo   = ta.lowest(atrRaw,  atrSmooth)
+atrSpan = math.max(atrHi - atrLo, 1e-10)      // evitar /0
+atrNorm = (atrRaw - atrLo) / atrSpan           // 0 = calma, 1 = explosión máxima
+
+// ── 3. EMA para dirección ───────────────────────────────────────
+emaLine   = ta.ema(close, emaLen)
+isBullish = close >= emaLine
+
+// ── 4. RSI ──────────────────────────────────────────────────────
+rsiVal     = ta.rsi(close, rsiLen)
+rsiPass    = useRSI ? (rsiVal >= rsiOB or rsiVal <= rsiOS) : true
+
+// ── 5. Transparencia dinámica ───────────────────────────────────
+// Interpola linealmente: atrNorm=0 → minTransp  |  atrNorm=1 → maxTransp
+transpRaw   = minTransp - atrNorm * (minTransp - maxTransp)
+transpFinal = int(math.max(math.min(transpRaw, 99), 0))
+
+// ── 6. Detección de explosión ───────────────────────────────────
+atrAvg      = ta.sma(atrRaw, atrSmooth)
+isExplosion = atrRaw >= atrAvg * atrMult
+
+// ── 7. Primer bar de explosión (evita señal continua) ───────────
+newExplosion = isExplosion and not isExplosion[1] and rsiPass
+
+// ═══════════════════════════════════════════════════════════════════
+// COLORES HEATMAP
+// ═══════════════════════════════════════════════════════════════════
+
+// Color base según dirección
+baseCol    = isBullish ? colBull : colBear
+
+// Heatmap con transparencia dinámica
+heatCol    = color.new(baseCol, transpFinal)
+
+// Flash de explosión: capa extra semi-transparente
+flashCol   = isBullish
+     ? color.new(#00ffcc, 80)
+     : color.new(#ff2244, 80)
+
+// ═══════════════════════════════════════════════════════════════════
+// RENDERIZADO
+// ═══════════════════════════════════════════════════════════════════
+
+// ── EMA (minimalista, gris neutro) ──────────────────────────────
+plot(
+     showEMA ? emaLine : na,
+     title     = "EMA Trend",
+     color     = color.new(color.silver, 35),
+     linewidth = 1,
+     style     = plot.style_line)
+
+// ── Heatmap principal (fondo dinámico) ──────────────────────────
+bgcolor(
+     rsiPass ? heatCol : na,
+     title = "Volatility Heatmap")
+
+// ── Flash adicional en barra de explosión ───────────────────────
+bgcolor(
+     isExplosion and rsiPass ? flashCol : na,
+     title = "Explosion Flash Layer")
+
+// ── Señales de explosión (triángulos) ───────────────────────────
+plotshape(
+     showSig and newExplosion and isBullish ? low : na,
+     title    = "Bull Explosion Signal",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     color    = color.new(#00ffcc, 0),
+     size     = size.small)
+
+plotshape(
+     showSig and newExplosion and not isBullish ? high : na,
+     title    = "Bear Explosion Signal",
+     style    = shape.triangledown,
+     location = location.abovebar,
+     color    = color.new(#ff2244, 0),
+     size     = size.small)
+
+// ── Plot invisible de ATR normalizado (útil para debuggear) ─────
+plot(
+     na,
+     title     = "ATR Norm [hidden]",
+     display   = display.none)
+
+// ═══════════════════════════════════════════════════════════════════
+// ALERTAS
+// ═══════════════════════════════════════════════════════════════════
+
+alertcondition(
+     alertOnExpl and newExplosion and isBullish,
+     title   = "VHQ · Bullish Explosion",
+     message = "⚡ VHQ — Bullish volatility explosion. ATR above threshold.")
+
+alertcondition(
+     alertOnExpl and newExplosion and not isBullish,
+     title   = "VHQ · Bearish Explosion",
+     message = "⚡ VHQ — Bearish volatility explosion. ATR above threshold.")
+
+alertcondition(
+     alertOnExpl and newExplosion,
+     title   = "VHQ · Any Explosion",
+     message = "⚡ VHQ — Volatility explosion detected.")
+
+// ═══════════════════════════════════════════════════════════════════
+// END OF SCRIPT — Volatility Heatmap Quant v1.0
+// ═══════════════════════════════════════════════════════════════════

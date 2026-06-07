@@ -6,12 +6,12 @@
     <title>Herramientas gratuitas · nico66fx</title>
     <meta
       name="description"
-      content="Suite de herramientas gratuitas de nico66fx para trading algorítmico: analizador de backtests MT4/MT5, simulador de fondeos de prop firms y más. 100% en tu navegador."
+      content="Suite de herramientas gratuitas de nico66fx para trading algorítmico: analizador de backtests MT4/MT5, simulador de fondeos de prop firms, indicadores y robots gratis. 100% en tu navegador."
     />
     <meta name="theme-color" content="#0a0f1d" />
 
     <meta property="og:title" content="Herramientas gratuitas · nico66fx" />
-    <meta property="og:description" content="Analizador de backtests MT4/MT5, simulador de fondeos y más. Gratis y 100% local." />
+    <meta property="og:description" content="Analizador de backtests MT4/MT5, simulador de fondeos, indicadores y robots gratis. 100% local." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://nico66fx.github.io/tools/" />
 
@@ -84,6 +84,7 @@
       h1,
       h2,
       h3,
+      h4,
       .display {
         font-family: 'Sora', Inter, ui-sans-serif, system-ui, sans-serif;
         letter-spacing: -0.025em;
@@ -244,6 +245,44 @@
         border-color: rgba(96, 165, 250, 0.45);
         box-shadow: 0 28px 70px rgba(59, 130, 246, 0.18);
       }
+      /* Botones compactos para las tarjetas de descarga */
+      .btn-dl {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.4rem;
+        flex: 1 1 auto;
+        border-radius: 9999px;
+        background: linear-gradient(135deg, #3b82f6, #06b6d4);
+        color: #fff;
+        font-weight: 800;
+        font-size: 0.82rem;
+        padding: 0.5rem 0.9rem;
+        transition: transform 0.18s ease, filter 0.18s ease, box-shadow 0.18s ease;
+        box-shadow: 0 10px 28px rgba(59, 130, 246, 0.25);
+      }
+      .btn-dl:hover {
+        transform: translateY(-2px);
+        filter: brightness(1.08);
+        box-shadow: 0 16px 38px rgba(59, 130, 246, 0.38);
+      }
+      .btn-tg {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 9999px;
+        border: 1px solid rgba(96, 165, 250, 0.35);
+        background: rgba(17, 24, 39, 0.72);
+        color: #e5e7eb;
+        padding: 0.5rem 0.7rem;
+        transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, color 0.18s ease;
+      }
+      .btn-tg:hover {
+        border-color: rgba(96, 165, 250, 0.7);
+        background: rgba(31, 41, 55, 0.92);
+        color: #22d3ee;
+        transform: translateY(-1px);
+      }
     </style>
   </head>
 
@@ -272,7 +311,8 @@
             <span class="block text-[10px] uppercase tracking-widest text-brand-400">Herramientas gratuitas</span>
           </span>
         </a>
-        <a href="https://nico66fx.github.io" target="_blank" rel="noopener" class="btn-glow ml-auto" title="Bots y comunidad de trading algorítmico">
+        <a href="#indicadores" class="btn-secondary ml-auto hidden text-sm sm:inline-flex">Indicadores &amp; robots ↓</a>
+        <a href="https://nico66fx.github.io" target="_blank" rel="noopener" class="btn-glow sm:ml-3" title="Bots y comunidad de trading algorítmico">
           <span class="glow-dot"></span>
           Comunidad PRO
         </a>
@@ -419,8 +459,356 @@
         </div>
       </section>
 
+      <!-- ============================================================ -->
+      <!-- NUEVA SECCIÓN · Indicadores y robots gratuitos               -->
+      <!-- ============================================================ -->
+      <section id="indicadores" class="mx-auto max-w-6xl scroll-mt-20 px-4 pt-6 pb-4 sm:px-6">
+        <div class="mb-3 flex items-center gap-2">
+          <span class="h-5 w-1 rounded-full bg-accent"></span>
+          <h2 class="text-xl font-bold text-white sm:text-2xl">Indicadores y robots gratuitos</h2>
+        </div>
+        <p class="max-w-3xl text-sm text-slate-400">
+          Todos los códigos que enseño en mis vídeos de <strong class="text-slate-200">TikTok y Reels</strong>, agrupados en un
+          solo sitio. Indicadores de TradingView, robots y herramientas para MetaTrader 5, y los prompts de IA con los que se
+          crearon. Los enseño en mi <a href="https://t.me/cfcommfree" target="_blank" rel="noopener" class="font-semibold text-accent-400 hover:underline">Telegram</a>.
+        </p>
+
+        <!-- DISCLAIMER -->
+        <div class="mt-5 rounded-2xl border border-amber-400/40 bg-amber-400/10 px-5 py-4 text-sm leading-relaxed text-amber-100">
+          <div class="mb-1 flex items-center gap-2 font-bold text-amber-200">
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M12 9v4M12 17h.01" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            USO EXPERIMENTAL · LÉELO ANTES DE DESCARGAR
+          </div>
+          <p>
+            Todo este material es <strong>educativo</strong> y está pensado para <strong>estudiar y editar el código</strong>.
+            <strong>Bajo ningún concepto lo pongas en una cuenta real</strong> sin hacer antes tu propia investigación y tu propio
+            backtest. No me hago responsable de ninguna pérdida: los resultados pasados no garantizan resultados futuros y esto
+            <strong>no es asesoramiento financiero</strong>. Lo usas bajo tu entera responsabilidad.
+          </p>
+        </div>
+      </section>
+
+      <!-- Indicadores · TradingView -->
+      <section class="mx-auto max-w-6xl px-4 pb-2 sm:px-6">
+        <div class="mb-4 mt-4 flex flex-wrap items-center gap-2">
+          <span class="text-lg">📈</span>
+          <h3 class="text-lg font-bold text-white">Indicadores · TradingView</h3>
+          <span class="text-xs text-slate-500">Pine Script — ábrelo, copia el código y pégalo en el editor de TradingView</span>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <!-- Killzones -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M8 4v16" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Killzones · nico66fx PRO</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Sesiones Asia / Londres / NY con barridos de liquidez (sweeps), equilibrium 50% y panel de hora local. Estilo ICT.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/killzones-nico66fx.pine" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- NQ Dashboard -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 14l3-3 3 2 4-5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView</span>
+            </div>
+            <h4 class="text-base font-bold text-white">NQ Institutional Dashboard PRO</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Panel para Nasdaq: VIX, DXY, SPY, EMAs, RSI y divergencias SPY/NQ resumido en un solo vistazo.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/nq-dashboard-pro-nico66fx.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Volatility Heatmap -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Volatility Heatmap Quant</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Heatmap de volatilidad ATR-normalizada con filtro de RSI extremo y detección de dirección por EMA.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/volatility-heatmap-quant.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Ranked FVG -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="5" width="16" height="4" rx="1"/><rect x="4" y="15" width="16" height="4" rx="1"/><path d="M9 9v6M15 9v6" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Ranked FVG Zones</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Detecta los Fair Value Gaps (imbalances) y los rankea por fuerza y volumen, mostrando solo los más relevantes.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/ranked-fvg-zones.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Order Blocks Volume Delta -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M9 20V4M14 20v-7M19 20V8" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Order Blocks + Volume Delta 3D</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Order blocks con volumen delta y estilo 3D, detección de retests e invalidación automática de zonas.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/order-blocks-volume-delta-3d.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Liquidity Sweep XAU -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Liquidity Sweep XAU</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Marca swings y barridos de liquidez (sweeps) alcistas y bajistas en oro, con líneas y avisos.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/liquidity-sweep-xau.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- EMA Cross -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 18c5-1 6-12 9-12M3 6c5 1 12 12 18 12" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView · Strategy</span>
+            </div>
+            <h4 class="text-base font-bold text-white">EMA 50 / 200 Cross</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Strategy del cruce dorado / cruce de la muerte (EMA 50 y 200) con alertas listas para automatizar.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/ema50-200-cross-nico66fx.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Nasdaq Breakout 16:00 -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 text-accent-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-[11px] font-semibold text-accent-400">TradingView · Strategy</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Nasdaq Breakout 16:00</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Strategy de ruptura de la vela de las 16:00 en Nasdaq, con stop al mínimo y ratio riesgo:beneficio 2.0.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/indicadores/nasdaq-breakout-1600.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Robots y EAs · MetaTrader 5 -->
+      <section class="mx-auto max-w-6xl px-4 pt-8 pb-2 sm:px-6">
+        <div class="mb-4 flex flex-wrap items-center gap-2">
+          <span class="text-lg">🤖</span>
+          <h3 class="text-lg font-bold text-white">Robots y herramientas · MetaTrader 5</h3>
+          <span class="text-xs text-slate-500">Archivos .mq5 (código) y .ex5 (compilado) — cárgalos en MT5 y pruébalos SIEMPRE en demo</span>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <!-- Breakout Pullback -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M9 7V5a3 3 0 0 1 6 0v2" stroke-linecap="round"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>
+              </span>
+              <span class="rounded-full border border-brand/30 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand-400">EA · MT5</span>
+            </div>
+            <h4 class="text-base font-bold text-white">XAUUSD Breakout + Pullback v2</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Ruptura de estructura + entrada en pullback sobre oro, con sizing por % de riesgo, filtro de lateralidad y RR configurable.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/robots-mt5/xauusd-breakout-pullback-v2.mq5" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- EMA200 Breakout -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M9 7V5a3 3 0 0 1 6 0v2" stroke-linecap="round"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>
+              </span>
+              <span class="rounded-full border border-brand/30 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand-400">EA · MT5</span>
+            </div>
+            <h4 class="text-base font-bold text-white">XAU EMA200 Breakout</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">EA de ruptura apoyado en la EMA 200 con detección de swing, pensado para operativa de swing en oro.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/robots-mt5/xau-ema200-breakout.mq5" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Martingala (riesgo) -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M9 7V5a3 3 0 0 1 6 0v2" stroke-linecap="round"/><circle cx="9" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1" fill="currentColor" stroke="none"/></svg>
+              </span>
+              <span class="rounded-full border border-amber-400/40 bg-amber-400/10 px-2.5 py-0.5 text-[11px] font-semibold text-amber-300">⚠ Alto riesgo</span>
+            </div>
+            <h4 class="text-base font-bold text-white">XAUUSD Martingala Controlada</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Martingala con tope de niveles, control de drawdown y filtro EMA + RSI. La martingala puede vaciar la cuenta: solo para estudio.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/robots-mt5/xauusd-martingala-controlada.mq5" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Supply Demand Zones -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/></svg>
+              </span>
+              <span class="rounded-full border border-brand/30 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand-400">Indicador · MT5</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Supply &amp; Demand Zones</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Indicador que dibuja zonas de oferta y demanda por acción del precio, con invalidación de zonas rotas.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/robots-mt5/supply-demand-zones.mq5" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Guardian EA (compilado) -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6Z" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="rounded-full border border-brand/30 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand-400">EA · MT5 · .ex5</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Guardian EA</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Robot de protección / gestión de cuenta (archivo compilado .ex5). Cárgalo en MT5 y pruébalo en demo.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/robots-mt5/guardian-ea.ex5" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Simple Trading Manager (compilado) -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-brand-400">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 13h3M8 16h6" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-brand/30 bg-brand/10 px-2.5 py-0.5 text-[11px] font-semibold text-brand-400">Panel · MT5 · .ex5</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Simple Trading Manager</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Panel para gestionar tus operaciones a mano: breakeven, cierres parciales y trailing con un clic (archivo compilado .ex5).</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/robots-mt5/simple-trading-manager.ex5" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Prompts de IA -->
+      <section class="mx-auto max-w-6xl px-4 pt-8 pb-4 sm:px-6">
+        <div class="mb-4 flex flex-wrap items-center gap-2">
+          <span class="text-lg">💬</span>
+          <h3 class="text-lg font-bold text-white">Prompts de IA</h3>
+          <span class="text-xs text-slate-500">Pégalos en Claude / ChatGPT para generar o auditar el código tú mismo</span>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <!-- Prompt EA ATR -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-400/15 text-violet-300">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-0.5 text-[11px] font-semibold text-violet-300">Prompt IA</span>
+            </div>
+            <h4 class="text-base font-bold text-white">EA Breakout por ATR (MT5)</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Prompt para que la IA genere un EA completo de ruptura por volatilidad ATR en MQL5, listo para compilar.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/prompts/prompt-ea-atr-breakout-mt5.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Prompt EMAs -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-400/15 text-violet-300">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-0.5 text-[11px] font-semibold text-violet-300">Prompt IA</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Strategy EMAs (Pine v6)</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Prompt para crear una strategy profesional del cruce EMA 50/200 en TradingView, con filtros y gestión de riesgo.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/prompts/prompt-strategy-emas-pinev6.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+
+          <!-- Prompt Backtest -->
+          <div class="tool-card card-glass flex flex-col rounded-2xl p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-400/15 text-violet-300">
+                <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2" stroke-linecap="round"/></svg>
+              </span>
+              <span class="rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-0.5 text-[11px] font-semibold text-violet-300">Prompt IA</span>
+            </div>
+            <h4 class="text-base font-bold text-white">Análisis de Backtest (MQL5)</h4>
+            <p class="mt-1 flex-1 text-sm text-slate-400">Prompt para auditar críticamente un backtest: métricas, overfitting, robustez y red flags, sin suavizar.</p>
+            <div class="mt-4 flex items-center gap-2">
+              <a class="btn-dl" href="downloads/prompts/prompt-analisis-backtest-mql5.txt" download>Descargar ↓</a>
+              <a class="btn-tg" href="https://t.me/cfcommfree" target="_blank" rel="noopener" title="Código y dudas en Telegram" aria-label="Telegram"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4Z" stroke-linejoin="round"/><path d="M22 2 11 13" stroke-linecap="round"/></svg></a>
+            </div>
+          </div>
+        </div>
+
+        <!-- CTA Telegram de la sección -->
+        <div class="mt-8 flex flex-col items-center gap-3 rounded-2xl border border-white/10 bg-surface/40 px-5 py-6 text-center sm:flex-row sm:justify-between sm:text-left">
+          <p class="text-sm text-slate-300">
+            <strong class="text-white">¿Quieres los próximos códigos antes que nadie?</strong><br class="hidden sm:block" />
+            Subo todos los indicadores y robots de mis vídeos a mi Telegram gratuito.
+          </p>
+          <a href="https://t.me/cfcommfree" target="_blank" rel="noopener" class="btn-primary shrink-0">
+            <span class="glow-dot"></span> Unirme al Telegram gratis
+          </a>
+        </div>
+      </section>
+
       <!-- Privacidad -->
-      <section class="mx-auto max-w-6xl px-4 pb-12 sm:px-6">
+      <section class="mx-auto max-w-6xl px-4 pb-12 pt-4 sm:px-6">
         <div class="rounded-2xl border border-white/10 bg-surface/40 px-5 py-4 text-center text-sm text-slate-400">
           🔒 Todas las herramientas se ejecutan en tu navegador. <span class="text-slate-200">Sin servidores, sin registros, sin subir tus datos.</span>
         </div>
@@ -433,11 +821,14 @@
         <span class="text-slate-700">·</span>
         <a href="https://t.me/cfcommfree" target="_blank" rel="noopener" class="font-semibold text-slate-300 hover:text-accent-400">Comunidad en Telegram</a>
         <span class="text-slate-700">·</span>
+        <a href="#indicadores" class="font-semibold text-slate-300 hover:text-accent-400">Indicadores y robots</a>
+        <span class="text-slate-700">·</span>
         <a href="https://nico66fx.github.io/backtest/" class="font-semibold text-slate-300 hover:text-brand-400">Backtest Analyzer</a>
       </div>
       <p class="mx-auto max-w-3xl">
-        <strong class="text-slate-400">Aviso:</strong> contenido educativo. Los resultados pasados no garantizan
-        resultados futuros. Esto no es asesoramiento financiero.
+        <strong class="text-slate-400">Aviso:</strong> contenido educativo de uso experimental. Los indicadores, robots y prompts
+        se ofrecen para estudiar y editar el código; no los uses en real sin tu propia investigación y backtest. Los resultados
+        pasados no garantizan resultados futuros. Esto no es asesoramiento financiero y el autor no se responsabiliza de las pérdidas.
       </p>
       <p class="mt-2 text-slate-600">© nico66fx · Herramientas gratuitas para la comunidad</p>
     </footer>

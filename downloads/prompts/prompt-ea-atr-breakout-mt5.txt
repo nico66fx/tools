@@ -1,0 +1,46 @@
+You are a senior quantitative developer specialized in MQL5 and MetaTrader 5 Expert Advisors. Create a complete, production-ready MT5 Expert Advisor in pure MQL5. Do NOT include any MQL4 code or compatibility layers. The EA must be optimized for efficiency and avoid unnecessary calculations on every tick. Use proper new-bar detection and clean architecture. STRATEGY LOGIC: The strategy is based on ATR volatility breakout candles.
+Use a configurable ATR indicator:
+ATR period = user input
+Timeframe = user input
+The EA must analyze ONLY the last fully closed candle.
+A signal occurs when: Candle Range >= ATR * Multiplier Where:
+Candle Range = High - Low
+ATR = ATR value of the signal candle
+Multiplier = user input
+Trade direction:
+Bullish candle → Buy
+Bearish candle → Sell
+Close proximity filter: For BUY trades:
+The candle close must be near the HIGH of the candle.
+The maximum distance from close to high should be configurable as a percentage of total candle size. For SELL trades:
+The candle close must be near the LOW of the candle.
+The maximum distance from close to low should be configurable as a percentage of total candle size.
+Risk Management:
+Stop Loss must be configurable as a percentage of entry price.
+Take Profit must be configurable as a percentage of entry price.
+Position sizing must use FIXED MONEY RISK per trade.
+Automatically calculate lot size based on SL distance and symbol tick value.
+Trade Management:
+Only ONE trade per signal candle.
+Use Magic Number input.
+Use slippage input.
+Prevent duplicate entries on the same candle.
+Chart Visualization: When a trade is opened:
+Create a chart object above the signal candle.
+Display:
+ATR value
+Candle size
+Direction (BUY or SELL)
+The object should remain on chart historically.
+Code Requirements:
+Use CTrade class
+Use input groups
+Validate all inputs in OnInit()
+Use CopyBuffer properly
+Use CopyRates properly
+Release indicator handles in OnDeinit()
+Normalize lot sizes correctly
+Handle broker min/max lot constraints
+Add clear comments
+Make the code modular and readable
+Output: Return ONLY the complete .mq5 source code. Do not explain the strategy. Do not summarize anything. Do not omit any functions. The code must compile in MetaEditor without modification.

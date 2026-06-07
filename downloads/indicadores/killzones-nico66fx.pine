@@ -1,0 +1,286 @@
+// Killzones · nico66fx PRO
+// Ajusta las sesiones a TU zona horaria. Por defecto: Europe/Madrid.
+// Comunidad: (tu enlace)
+//
+// Indicador de killzones / sesiones (Asia · Londres · Nueva York) con extras ICT:
+//   • Cajas que envuelven el rango (máx/mín) de cada sesión.
+//   • Panel "tu hora local" + cuenta atrás a la próxima killzone + sesión activa.
+//   • Líneas de liquidez con DETECCIÓN DE BARRIDO (sweep) y alerta.
+//   • Equilibrium 50% (EQ) de cada killzone.
+//   • Pips del rango, temas de color y marca de agua.
+// Todo timezone-aware: el horario de verano lo gestiona TradingView automáticamente.
+
+//@version=5
+indicator("Killzones · nico66fx PRO", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// ─────────────────────────────────────────────────────────────────────────
+// INPUTS · GENERAL
+// ─────────────────────────────────────────────────────────────────────────
+grpGen = "⚙️ General"
+tzUsuario        = input.string("Europe/Madrid", "Zona horaria", options = ["Europe/Madrid", "Europe/London", "America/New_York", "UTC"], group = grpGen, tooltip = "Las horas de sesión se interpretan en esta zona. El cambio de horario de verano lo gestiona TradingView.")
+diasDibujar      = input.int(5, "Días a dibujar", minval = 1, maxval = 60, group = grpGen, tooltip = "Solo se dibujan las killzones de los últimos N días respecto a la fecha actual.")
+mostrarEtiquetas = input.bool(true,  "Mostrar etiquetas (Asia/Londres/NY)", group = grpGen)
+extenderEnVivo   = input.bool(true,  "Extender la caja mientras opera",     group = grpGen, tooltip = "Si está activo, la caja crece en vivo durante la sesión. Si no, aparece ya completa al cerrar la sesión.")
+mostrarLiquidez  = input.bool(true,  "Mostrar líneas de liquidez",          group = grpGen, tooltip = "Al cerrar la sesión, proyecta el máximo y el mínimo hacia la derecha (niveles que el precio suele buscar).")
+velasExtension   = input.int(30, "Velas de extensión de las líneas", minval = 1, maxval = 500, group = grpGen)
+
+// ─────────────────────────────────────────────────────────────────────────
+// INPUTS · EXTRAS ICT
+// ─────────────────────────────────────────────────────────────────────────
+grpICT = "✨ Extras ICT"
+mostrarEquilibrium = input.bool(true, "Equilibrium 50% (EQ)",            group = grpICT, tooltip = "Dibuja el punto medio del rango de cada killzone (zona de premium/discount).")
+mostrarSweep       = input.bool(true, "Detección de barrido (sweep)",    group = grpICT, tooltip = "Cuando el precio se lleva el high/low de una killzone, marca el nivel como barrido y dispara una alerta.")
+mostrarPips        = input.bool(true, "Mostrar pips del rango en la etiqueta", group = grpICT)
+
+// ─────────────────────────────────────────────────────────────────────────
+// INPUTS · TEMA Y PANEL
+// ─────────────────────────────────────────────────────────────────────────
+grpUI = "🎨 Tema y panel"
+tema         = input.string("Marca nico66fx", "Tema de color", options = ["Marca nico66fx", "ICT", "Neón", "Minimal", "Personalizado"], group = grpUI, tooltip = "Cambia toda la paleta de golpe. Elige 'Personalizado' para usar los colores de cada killzone de abajo.")
+mostrarPanel = input.bool(true, "Mostrar panel (hora + cuenta atrás)", group = grpUI)
+posPanelStr  = input.string("Arriba derecha", "Posición del panel", options = ["Arriba derecha", "Arriba izquierda", "Abajo derecha", "Abajo izquierda"], group = grpUI)
+mostrarMarca = input.bool(true, "Marca de agua nico66fx PRO", group = grpUI)
+
+// ─────────────────────────────────────────────────────────────────────────
+// INPUTS · KILLZONES
+// Horarios por defecto en hora Europe/Madrid (aproximados): ajústalos a tu
+// gusto. Si cambias la zona horaria arriba, recuerda revisar estos rangos.
+// (Los colores solo se aplican con el tema "Personalizado".)
+// ─────────────────────────────────────────────────────────────────────────
+grpAsia = "🌏 Asia"
+activarAsia = input.bool(true,           "Activar",  inline = "asia", group = grpAsia)
+colAsia     = input.color(#2962FF,       "",         inline = "asia", group = grpAsia)
+sesAsia     = input.session("0200-0600", "Sesión",                    group = grpAsia, tooltip = "Por defecto en hora Europe/Madrid.")
+
+grpLon = "🇬🇧 Londres"
+activarLon = input.bool(true,            "Activar",  inline = "lon",  group = grpLon)
+colLon     = input.color(#26A69A,        "",         inline = "lon",  group = grpLon)
+sesLon     = input.session("0800-1100",  "Sesión",                    group = grpLon, tooltip = "Por defecto en hora Europe/Madrid.")
+
+grpNY = "🇺🇸 Nueva York"
+activarNY = input.bool(true,             "Activar",  inline = "ny",   group = grpNY)
+colNY     = input.color(#E0B341,         "",         inline = "ny",   group = grpNY)
+sesNY     = input.session("1330-1630",   "Sesión",                    group = grpNY, tooltip = "Por defecto en hora Europe/Madrid.")
+
+// ─────────────────────────────────────────────────────────────────────────
+// CONSTANTES Y DERIVADOS
+// ─────────────────────────────────────────────────────────────────────────
+TRANSP_FONDO = 82            // transparencia del fondo de la caja
+TRANSP_BORDE = 40            // transparencia del borde (más sólido)
+MS_POR_DIA   = 86400000.0    // milisegundos en un día
+pipFactor    = syminfo.mintick * 10   // tamaño aproximado de 1 pip (FX 5/3 dígitos)
+
+// Paleta efectiva según el tema elegido.
+color colAsiaEf = colAsia
+color colLonEf  = colLon
+color colNYEf   = colNY
+if tema == "Marca nico66fx"
+    colAsiaEf := #2962FF
+    colLonEf  := #26A69A
+    colNYEf   := #E0B341
+else if tema == "ICT"
+    colAsiaEf := #3179F5
+    colLonEf  := #00A86B
+    colNYEf   := #E53935
+else if tema == "Neón"
+    colAsiaEf := #00E5FF
+    colLonEf  := #00FF85
+    colNYEf   := #FF00E5
+else if tema == "Minimal"
+    colAsiaEf := #5D606B
+    colLonEf  := #868993
+    colNYEf   := #E0B341
+
+// ─────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────
+// Rellena a 2 dígitos (para relojes 03:07:09).
+f_pad(int v) => (v < 10 ? "0" : "") + str.tostring(v)
+
+// Minuto del día (0-1439) en el que arranca una sesión "HHMM-HHMM".
+f_startMin(string s) =>
+    int h = int(str.tonumber(str.substring(s, 0, 2)))
+    int m = int(str.tonumber(str.substring(s, 2, 4)))
+    h * 60 + m
+
+// Texto de la etiqueta de la caja (con pips opcionales).
+f_txtEtiqueta(string nombre, float mx, float mn) =>
+    mostrarPips ? nombre + " · " + str.tostring(math.round((mx - mn) / pipFactor)) + " pips" : nombre
+
+// Traduce el texto de posición al constante de TradingView.
+f_pos(string s) =>
+    switch s
+        "Arriba derecha"   => position.top_right
+        "Arriba izquierda" => position.top_left
+        "Abajo derecha"    => position.bottom_right
+        "Abajo izquierda"  => position.bottom_left
+        => position.top_right
+
+// ─────────────────────────────────────────────────────────────────────────
+// FUNCIÓN REUTILIZABLE: lógica de una killzone
+// Recibe: activar, sesión, color y nombre. Mantiene su propio estado con
+// variables var internas. Devuelve true en la barra de APERTURA (alertas).
+// ─────────────────────────────────────────────────────────────────────────
+f_killzone(bool activar, string sesion, color colorZona, string nombre) =>
+    var box   caja        = na
+    var label etiqueta    = na
+    var line  lineHigh    = na
+    var line  lineLow     = na
+    var line  lineEq      = na
+    var label lblEq       = na
+    var float maxSesion   = na
+    var float minSesion   = na
+    var int   barIni      = na
+    var int   xExpira     = na
+    var float nivelHigh   = na
+    var float nivelLow    = na
+    var bool  highBarrido = false
+    var bool  lowBarrido  = false
+
+    // ¿La vela actual está dentro de la sesión? time() devuelve na si no.
+    bool enSesion = activar and not na(time(timeframe.period, sesion, tzUsuario))
+    bool inicio   = enSesion and not enSesion[1]
+    bool fin      = not enSesion and enSesion[1]
+    bool enRango  = (timenow - time) / MS_POR_DIA <= diasDibujar
+
+    if inicio and enRango
+        // Arranque: caja sobre el high/low de la primera vela de la sesión.
+        maxSesion := high
+        minSesion := low
+        barIni    := bar_index
+        caja := box.new(barIni, maxSesion, bar_index, minSesion, border_color = color.new(colorZona, TRANSP_BORDE), border_width = 1, bgcolor = color.new(colorZona, TRANSP_FONDO))
+        if mostrarEtiquetas
+            etiqueta := label.new(barIni, maxSesion, f_txtEtiqueta(nombre, maxSesion, minSesion), xloc = xloc.bar_index, style = label.style_label_down, textcolor = chart.fg_color, color = color.new(colorZona, 100), size = size.small)
+
+    else if enSesion and not na(caja)
+        // Sesión en curso: acumulamos máximo/mínimo del rango.
+        maxSesion := math.max(maxSesion, high)
+        minSesion := math.min(minSesion, low)
+        if extenderEnVivo
+            box.set_top(caja, maxSesion)
+            box.set_bottom(caja, minSesion)
+            box.set_right(caja, bar_index)
+            if mostrarEtiquetas and not na(etiqueta)
+                label.set_xy(etiqueta, barIni, maxSesion)
+                label.set_text(etiqueta, f_txtEtiqueta(nombre, maxSesion, minSesion))
+
+    else if fin and not na(caja)
+        // Cierre: fijamos la caja con los extremos definitivos.
+        // La última vela de la sesión es la anterior (bar_index - 1).
+        int barFin = bar_index - 1
+        int xFin   = barFin + velasExtension
+        box.set_top(caja, maxSesion)
+        box.set_bottom(caja, minSesion)
+        box.set_right(caja, barFin)
+        if mostrarEtiquetas and not na(etiqueta)
+            label.set_xy(etiqueta, barIni, maxSesion)
+            label.set_text(etiqueta, f_txtEtiqueta(nombre, maxSesion, minSesion))
+
+        // Líneas de liquidez (high/low proyectados a la derecha).
+        if mostrarLiquidez
+            nivelHigh   := maxSesion
+            nivelLow    := minSesion
+            highBarrido := false
+            lowBarrido  := false
+            xExpira     := xFin
+            lineHigh := line.new(barFin, nivelHigh, xFin, nivelHigh, xloc = xloc.bar_index, color = color.new(colorZona, 0), style = line.style_dotted, width = 1)
+            lineLow  := line.new(barFin, nivelLow,  xFin, nivelLow,  xloc = xloc.bar_index, color = color.new(colorZona, 0), style = line.style_dotted, width = 1)
+
+        // Equilibrium 50% (premium arriba / discount abajo).
+        if mostrarEquilibrium
+            float eq = math.avg(maxSesion, minSesion)
+            lineEq := line.new(barFin, eq, xFin, eq, xloc = xloc.bar_index, color = color.new(colorZona, 30), style = line.style_dashed, width = 1)
+            if mostrarEtiquetas
+                lblEq := label.new(xFin, eq, "EQ", xloc = xloc.bar_index, style = label.style_none, textcolor = color.new(colorZona, 0), size = size.tiny)
+
+    // Detección de BARRIDO (sweep) sobre los niveles vigentes.
+    if mostrarLiquidez and mostrarSweep and not na(lineHigh) and bar_index <= xExpira
+        if not highBarrido and high > nivelHigh
+            highBarrido := true
+            line.set_style(lineHigh, line.style_solid)
+            line.set_width(lineHigh, 2)
+            line.set_x2(lineHigh, bar_index)
+            label.new(bar_index, nivelHigh, "⚡ SWEEP", xloc = xloc.bar_index, style = label.style_label_down, textcolor = chart.fg_color, color = color.new(colorZona, 20), size = size.tiny)
+            alert("Barrido del HIGH de " + nombre, alert.freq_once_per_bar)
+        if not lowBarrido and low < nivelLow
+            lowBarrido := true
+            line.set_style(lineLow, line.style_solid)
+            line.set_width(lineLow, 2)
+            line.set_x2(lineLow, bar_index)
+            label.new(bar_index, nivelLow, "⚡ SWEEP", xloc = xloc.bar_index, style = label.style_label_up, textcolor = chart.fg_color, color = color.new(colorZona, 20), size = size.tiny)
+            alert("Barrido del LOW de " + nombre, alert.freq_once_per_bar)
+
+    // Valor de retorno: ¿se acaba de abrir la sesión? (para alertcondition)
+    inicio and enRango
+
+// ─────────────────────────────────────────────────────────────────────────
+// LLAMADAS: una por killzone
+// ─────────────────────────────────────────────────────────────────────────
+bool abrioAsia = f_killzone(activarAsia, sesAsia, colAsiaEf, "Asia")
+bool abrioLon  = f_killzone(activarLon,  sesLon,  colLonEf,  "Londres")
+bool abrioNY   = f_killzone(activarNY,   sesNY,   colNYEf,   "Nueva York")
+
+// ─────────────────────────────────────────────────────────────────────────
+// ALERTAS DE APERTURA (ámbito global)
+// ─────────────────────────────────────────────────────────────────────────
+alertcondition(abrioAsia, "Apertura killzone Asia",       "Apertura killzone Asia")
+alertcondition(abrioLon,  "Apertura killzone Londres",    "Apertura killzone Londres")
+alertcondition(abrioNY,   "Apertura killzone Nueva York", "Apertura killzone Nueva York")
+
+// ─────────────────────────────────────────────────────────────────────────
+// PANEL: tu hora local + sesión activa + cuenta atrás a la próxima killzone
+// ─────────────────────────────────────────────────────────────────────────
+var table panel = table.new(f_pos(posPanelStr), 2, 4, bgcolor = color.new(chart.bg_color, 10), border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+if mostrarPanel and barstate.islast
+    // Hora local del usuario.
+    int    nowMin    = hour(timenow, tzUsuario) * 60 + minute(timenow, tzUsuario)
+    int    nowSec    = second(timenow, tzUsuario)
+    string horaLocal = f_pad(hour(timenow, tzUsuario)) + ":" + f_pad(minute(timenow, tzUsuario))
+
+    // Datos de las tres killzones.
+    nombresKZ  = array.from("Asia", "Londres", "Nueva York")
+    sesionesKZ = array.from(sesAsia, sesLon, sesNY)
+    activosKZ  = array.from(activarAsia, activarLon, activarNY)
+    coloresKZ  = array.from(colAsiaEf, colLonEf, colNYEf)
+
+    // ¿Cuál está activa y cuál es la próxima en abrir?
+    int activaIdx = -1
+    int nextIdx   = -1
+    int nextDiff  = 100000
+    for i = 0 to 2
+        if array.get(activosKZ, i)
+            if not na(time(timeframe.period, array.get(sesionesKZ, i), tzUsuario))
+                activaIdx := i
+            int d = f_startMin(array.get(sesionesKZ, i)) - nowMin
+            d := d <= 0 ? d + 1440 : d
+            if d < nextDiff
+                nextDiff := d
+                nextIdx  := i
+
+    string activaTxt = activaIdx >= 0 ? array.get(nombresKZ, activaIdx) : "—"
+    color  activaCol = activaIdx >= 0 ? array.get(coloresKZ, activaIdx) : color.gray
+
+    string proxTxt = "—"
+    color  proxCol = chart.fg_color
+    if nextIdx >= 0
+        int remSec = nextDiff * 60 - nowSec
+        proxTxt := array.get(nombresKZ, nextIdx) + "  " + f_pad(int(remSec / 3600)) + ":" + f_pad(int((remSec % 3600) / 60)) + ":" + f_pad(remSec % 60)
+        proxCol := array.get(coloresKZ, nextIdx)
+
+    // Pintamos el panel.
+    table.cell(panel, 0, 0, "KILLZONES · nico66fx PRO", text_color = chart.fg_color, text_size = size.small, bgcolor = color.new(color.gray, 70))
+    table.merge_cells(panel, 0, 0, 1, 0)
+    table.cell(panel, 0, 1, "🕐 Tu hora",  text_color = chart.fg_color, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 1, horaLocal,     text_color = chart.fg_color, text_size = size.small)
+    table.cell(panel, 0, 2, "● Activa",    text_color = chart.fg_color, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 2, activaTxt,     text_color = activaCol,      text_size = size.small)
+    table.cell(panel, 0, 3, "⏳ Próxima",  text_color = chart.fg_color, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 3, proxTxt,       text_color = proxCol,        text_size = size.small)
+
+// ─────────────────────────────────────────────────────────────────────────
+// MARCA DE AGUA
+// ─────────────────────────────────────────────────────────────────────────
+var table marca = table.new(position.bottom_right, 1, 1)
+if mostrarMarca and barstate.islast
+    table.cell(marca, 0, 0, "nico66fx PRO", text_color = color.new(chart.fg_color, 55), text_size = size.normal)

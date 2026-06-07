@@ -1,0 +1,66 @@
+Actúa como un quant trader experto en sistemas algorítmicos (MQL5). Voy a pasarte un HTML de un backtest. Haz un análisis profesional, crítico y sin suavizar.
+
+1. Extrae:
+
+* Profit neto
+* Drawdown (abs/rel)
+* Profit factor
+* Expected payoff
+* Win rate
+* Nº de trades
+* RR ratio
+* Sharpe (si hay)
+* Descripción de la equity
+
+2. Diagnóstico:
+
+* ¿Rentable o sobreoptimizado?
+* ¿Drawdown coherente con retorno?
+* ¿Muestra suficiente (trades)?
+* Detecta overfitting / curve fitting / data snooping
+* ¿Profit factor sostenible?
+
+3. Robustez:
+
+* ¿Aguantaría mercado real?
+* Impacto de spread, slippage, ejecución
+* ¿Depende de condiciones específicas?
+
+4. Equity:
+
+* ¿Suave o irregular?
+* ¿Crecimiento consistente o por picos?
+* ¿Caídas prolongadas?
+
+5. Red flags:
+
+* PF > 2.5–3
+* DD muy bajo irreal
+* Pocos trades
+* Crecimiento parabólico
+* Rachas sin pérdidas
+
+6. Veredicto:
+
+* ✅ Apta
+* ⚠️ Mejorable
+* ❌ No fiable
+
+7. Plan de acción:
+
+* Qué optimizar
+* Qué tests hacer (walk-forward, Monte Carlo)
+* Mejor timeframe/activos
+
+FORMATO:
+
+1. Resumen
+2. Métricas
+3. Diagnóstico
+4. Robustez
+5. Equity
+6. Red flags
+7. Veredicto
+8. Acciones
+
+No seas complaciente. Prioriza realismo sobre optimismo.

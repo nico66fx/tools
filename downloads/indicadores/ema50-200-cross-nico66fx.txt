@@ -1,0 +1,34 @@
+//@version=6
+strategy("EMA Cross Strategy", overlay=true)
+
+// EMAs
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// Dibujar
+plot(ema50, color=color.green)
+plot(ema200, color=color.red)
+
+// Condiciones
+longCondition = ta.crossover(ema50, ema200)
+shortCondition = ta.crossunder(ema50, ema200)
+
+// Entradas
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.close("Long")
+
+// ALERTAS
+alertcondition(
+     longCondition,
+     title="Golden Cross",
+     message="EMA50 cruzó por encima de EMA200"
+)
+
+alertcondition(
+     shortCondition,
+     title="Death Cross",
+     message="EMA50 cruzó por debajo de EMA200"
+)

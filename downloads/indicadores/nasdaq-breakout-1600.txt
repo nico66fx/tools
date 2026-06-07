@@ -1,0 +1,41 @@
+//@version=5
+strategy("16:00 Breakout Strategy", overlay=true)
+
+// === CONFIG ===
+lookback = 50
+maxBars  = 8
+rr       = 2.0
+
+// === VELA DE LAS 16:00 ===
+isSessionBar = hour == 16 and minute == 0
+
+// === ÚLTIMO MÁXIMO ===
+highestHigh = ta.highest(high, lookback)[1]
+
+// === CONDICIÓN ===
+validSetup = isSessionBar and high >= highestHigh
+
+// === VARIABLES ===
+var float entryPrice = na
+var float stopPrice  = na
+var float takePrice  = na
+var int setupBar     = na
+
+// === GUARDAR SETUP ===
+if validSetup
+    entryPrice := highestHigh
+    stopPrice  := low
+    takePrice  := entryPrice + ((entryPrice - stopPrice) * rr)
+    setupBar   := bar_index
+
+// === ENTRADA PENDIENTE DURANTE 8 VELAS ===
+activeSetup = not na(setupBar) and (bar_index - setupBar <= maxBars)
+
+if activeSetup
+    strategy.entry("Long", strategy.long, stop=entryPrice)
+    strategy.exit("TP/SL", "Long", stop=stopPrice, limit=takePrice)
+
+// === DIBUJOS ===
+plot(entryPrice, color=color.yellow, linewidth=2, title="Entry")
+plot(stopPrice, color=color.red, title="Stop Loss")
+plot(takePrice, color=color.green, title="Take Profit")

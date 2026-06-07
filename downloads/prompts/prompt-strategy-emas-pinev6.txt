@@ -1,0 +1,64 @@
+Crea una strategy profesional en Pine Script v6 para TradingView basada en el cruce de EMA 50 y EMA 200.
+
+REQUISITOS GENERALES:
+- Usar strategy() y NO indicator()
+- Código limpio, profesional y bien comentado
+- Compatible con backtesting en TradingView
+- Sin repaint
+- Optimizado para alertas y automatización
+
+LÓGICA:
+- Abrir LONG cuando EMA 50 cruce por encima de EMA 200
+- Cerrar LONG cuando EMA 50 cruce por debajo de EMA 200
+- Añadir opción para permitir SHORTS
+- Confirmar señales únicamente al cierre de vela usando barstate.isconfirmed
+
+VISUAL:
+- Dibujar EMA 50 en verde
+- Dibujar EMA 200 en rojo
+- Mostrar flechas de compra y venta
+- Mostrar fondo opcional alcista/bajista dependiendo de las EMAs
+
+INPUTS CONFIGURABLES:
+- Periodo EMA rápida
+- Periodo EMA lenta
+- Activar/desactivar shorts
+- Stop Loss %
+- Take Profit %
+- Activar/desactivar RSI filter
+- Periodo RSI
+- Nivel mínimo RSI para longs
+- Nivel máximo RSI para shorts
+
+FILTROS:
+- Filtro RSI opcional
+- Solo permitir longs si RSI > nivel configurado
+- Solo permitir shorts si RSI < nivel configurado
+- Añadir filtro opcional de pendiente positiva/negativa de EMA 200
+
+RIESGO:
+- Añadir strategy.exit con Stop Loss y Take Profit porcentual
+- Inputs configurables para SL y TP
+
+ALERTAS:
+- Crear alertcondition para:
+  - Golden Cross
+  - Death Cross
+  - Entrada Long
+  - Entrada Short
+- Mensajes claros para webhooks
+
+WEBHOOKS:
+- Añadir ejemplos JSON para automatización
+- Formato limpio para conectar con bots externos
+
+ESTADÍSTICAS:
+- Mostrar información básica en pantalla:
+  - Tendencia actual
+  - RSI actual
+  - Estado de EMA 50 vs EMA 200
+
+EXTRA:
+- Evitar operaciones repetidas en la misma dirección
+- Mantener estructura modular y fácil de modificar
+- Usar buenas prácticas de Pine Script v6
