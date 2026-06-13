@@ -1,0 +1,517 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// SMART MONEY FLOW — COMPLETE [SMF-C]
+// ─────────────────────────────────────────────────────────────────────────────
+// TODO EN UNO: un único indicador que combina
+//
+//   SOBRE EL GRÁFICO (vía force_overlay):
+//     ▲ / ▼  Flechas grandes ........ cambio de bando dominante (con confluencia)
+//     ⚠      Avisos de giro ......... agotamiento (posible techo / suelo)
+//     Líneas en el precio .......... divergencias confirmadas, en lenguaje llano
+//     Velas coloreadas ............. intensidad del flujo comprador/vendedor
+//     Fondo suave del gráfico ...... quién domina ahora mismo
+//     PANEL "¿QUIÉN MANDA?" ........ fuerza en %, riesgo de giro y lectura en
+//                                    una frase (+ filas técnicas opcionales)
+//
+//   EN EL PANEL INFERIOR (este indicador):
+//     Oscilador de flujo -100/+100 + línea lenta de régimen
+//     Histograma de presión inmediata
+//     Tira de confluencia 0-100 con colores progresivos
+//     Líneas de divergencia sobre el propio oscilador
+//
+// SIN REPAINT:
+//   - Solo datos de barras cerradas/pasadas; sin request.security ni futuros.
+//   - Las divergencias se confirman `pivRight` barras tras el pivot (retardo
+//     estructural); una vez dibujadas no se mueven ni se borran.
+//   - Configurar las alertas como "Una vez por barra (al cierre)".
+//
+// COMPATIBILIDAD: Forex, índices, materias primas, cripto y acciones. Si el
+// símbolo no aporta volumen, se usa un proxy de esfuerzo (rango vs ATR).
+// ─────────────────────────────────────────────────────────────────────────────
+
+indicator("Smart Money Flow — Complete [SMF-C]", shorttitle = "SMF Complete",
+     overlay = false, max_lines_count = 500, max_labels_count = 500)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 0. INPUTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── ① Lo esencial ────────────────────────────────────────────────────────────
+grpMain    = "① Lo esencial"
+preset     = input.string("Equilibrado", "Estilo de señales",
+     options = ["Conservador", "Equilibrado", "Agresivo"], group = grpMain,
+     tooltip = "Conservador: pocas señales, muy filtradas.\nEquilibrado: punto medio.\nAgresivo: más señales, más ruido.")
+showPanel  = input.bool(true, "Panel '¿Quién manda?'",            group = grpMain)
+panelTech  = input.bool(false, "Añadir filas técnicas al panel",  group = grpMain,
+     tooltip = "Agrega valores numéricos del oscilador, línea lenta y última divergencia.")
+panelPos   = input.string("Arriba derecha", "Posición del panel",
+     options = ["Arriba derecha", "Arriba izquierda", "Abajo derecha", "Abajo izquierda"], group = grpMain)
+panelSize  = input.string("Normal", "Tamaño del panel", options = ["Compacto", "Normal", "Grande"], group = grpMain)
+
+// ── ② Elementos sobre el gráfico ─────────────────────────────────────────────
+grpChart   = "② Sobre el gráfico (velas)"
+showArrows  = input.bool(true, "Flechas de cambio de bando (▲▼)",        group = grpChart)
+showExhChart= input.bool(true, "Avisos de posible giro (⚠ techo/suelo)", group = grpChart)
+showDivPrice= input.bool(true, "Divergencias sobre el precio",           group = grpChart)
+showCandles = input.bool(true, "Colorear velas según el flujo",          group = grpChart)
+showBgChart = input.bool(true, "Fondo del gráfico según dominio",        group = grpChart)
+
+// ── ③ Elementos del panel inferior ───────────────────────────────────────────
+grpPane    = "③ Panel inferior (oscilador)"
+showHist    = input.bool(true, "Histograma de presión",                  group = grpPane)
+showConf    = input.bool(true, "Tira de confluencia (colores progresivos)", group = grpPane)
+showDivPane = input.bool(true, "Divergencias sobre el oscilador",        group = grpPane)
+showBgPane  = input.bool(false, "Fondo del panel según dominio",         group = grpPane)
+
+// ── ④ Motor de flujo (avanzado) ──────────────────────────────────────────────
+grpFlow    = "④ Motor de flujo (avanzado)"
+flowLen    = input.int(14,  "Longitud del flujo",             minval = 2,  group = grpFlow)
+smoothLen  = input.int(3,   "Suavizado del oscilador",        minval = 1,  group = grpFlow)
+slowLen    = input.int(21,  "Longitud línea lenta (régimen)", minval = 2,  group = grpFlow)
+momLen     = input.int(10,  "Longitud del momentum",          minval = 2,  group = grpFlow)
+normLen    = input.int(100, "Ventana de normalización",       minval = 20, group = grpFlow,
+     tooltip = "Ventana estadística (z-score) para escalar a -100/+100. Hace al indicador adaptable a cualquier activo y temporalidad.")
+wFlow      = input.float(0.65, "Peso: presión por volumen",   minval = 0, maxval = 1, step = 0.05, group = grpFlow)
+wMom       = input.float(0.35, "Peso: momentum",              minval = 0, maxval = 1, step = 0.05, group = grpFlow)
+domThresh  = input.float(10.0, "Umbral de dominio (histéresis)", minval = 0, maxval = 50, group = grpFlow,
+     tooltip = "El dominio solo cambia al cruzar ±umbral. Evita flips en zona neutral.")
+histLen    = input.int(5, "Suavizado del histograma",         minval = 1,  group = grpFlow)
+
+// ── ⑤ Agotamiento y divergencias (avanzado) ──────────────────────────────────
+grpSig     = "⑤ Agotamiento y divergencias (avanzado)"
+exhLen     = input.int(14, "Agotamiento: ventana de extremos",     minval = 5,  group = grpSig)
+extLen     = input.int(50, "Agotamiento: media de referencia",     minval = 10, group = grpSig)
+extThresh  = input.float(2.5, "Agotamiento: expansión máx (xATR)", minval = 0.5, step = 0.25, group = grpSig)
+exhCool    = input.int(10, "Agotamiento: barras entre avisos",     minval = 1,  group = grpSig)
+pivLeft    = input.int(5,  "Divergencias: barras izquierda",       minval = 2,  group = grpSig)
+pivRight   = input.int(3,  "Divergencias: barras de confirmación", minval = 1,  group = grpSig,
+     tooltip = "Más barras = pivots más fiables pero señal más tardía. La señal aparece N barras después del pivot y NUNCA repinta.")
+divMinBars = input.int(8,  "Divergencias: separación mínima",      minval = 3,  group = grpSig)
+divMaxBars = input.int(80, "Divergencias: separación máxima",      minval = 10, group = grpSig)
+showHidden = input.bool(false, "Incluir divergencias ocultas",     group = grpSig,
+     tooltip = "Las ocultas señalan continuación, no giro. Desactivadas por defecto para mantener el gráfico simple.")
+
+// ── ⑥ Colores ────────────────────────────────────────────────────────────────
+grpCol     = "⑥ Colores"
+cBull      = input.color(#26a69a, "Compradores",          group = grpCol)
+cBear      = input.color(#ef5350, "Vendedores",           group = grpCol)
+cNeutral   = input.color(#787b86, "Neutral",              group = grpCol)
+cWarn      = input.color(#f5b041, "Avisos",               group = grpCol)
+cSlow      = input.color(#ff9800, "Línea lenta",          group = grpCol)
+cHidden    = input.color(#ab47bc, "Divergencias ocultas", group = grpCol)
+
+// Presets → umbrales internos: [confluencia mínima para flechas,
+// calidad mínima de divergencia, umbral de agotamiento]
+[confMin, divMinQual, exhThresh] = switch preset
+    "Conservador" => [60.0, 60.0, 75.0]
+    "Agresivo"    => [30.0, 35.0, 55.0]
+    =>               [45.0, 45.0, 65.0]
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 1. FUNCIONES AUXILIARES
+// ═════════════════════════════════════════════════════════════════════════════
+
+f_tanh(float x) =>
+    xx = math.min(math.max(x, -20.0), 20.0)
+    e2 = math.exp(2.0 * xx)
+    (e2 - 1.0) / (e2 + 1.0)
+
+f_clamp(float v, float lo, float hi) =>
+    math.min(math.max(v, lo), hi)
+
+// Barra de progreso textual para el panel: ██████░░░░ (10 segmentos)
+f_bar(float pct) =>
+    filled = int(math.round(f_clamp(pct, 0.0, 100.0) / 10.0))
+    str.repeat("█", filled) + str.repeat("░", 10 - filled)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 2. MOTOR DE FLUJO DE CAPITAL
+// ═════════════════════════════════════════════════════════════════════════════
+// Cada vela es un "evento de subasta": estimamos quién la controló combinando
+// dónde cerró el precio dentro del rango (CLV), la convicción del cuerpo, el
+// esfuerzo relativo (volumen o proxy) y el momentum del precio.
+
+atrVal   = ta.atr(14)
+rng      = high - low
+safeRng  = math.max(rng, syminfo.mintick)
+
+clv      = (2.0 * close - high - low) / safeRng        // -1 cierre en mínimo … +1 en máximo
+bodyConv = math.abs(close - open) / safeRng            // convicción: cuerpo vs rango
+
+hasVol    = not na(volume)
+volProxy  = safeRng / math.max(atrVal, syminfo.mintick)
+effort    = hasVol ? volume : volProxy
+effortMa  = ta.sma(effort, normLen)
+relEffort = f_clamp(effort / math.max(effortMa, 1e-10), 0.0, 4.0)   // cap anti-outliers
+
+rawPressure = clv * relEffort * (0.5 + 0.5 * bodyConv)
+
+mom    = ta.roc(close, momLen)
+momMa  = ta.sma(mom, normLen)
+momSd  = ta.stdev(mom, normLen)
+momZ   = momSd > 0 ? (mom - momMa) / momSd : 0.0
+
+flowCore = ta.ema(rawPressure, flowLen)
+flowSd   = ta.stdev(flowCore, normLen)
+flowZ    = flowSd > 0 ? flowCore / flowSd : 0.0
+
+wSum    = math.max(wFlow + wMom, 1e-10)
+oscRaw  = 100.0 * f_tanh((flowZ * wFlow + momZ * wMom) / wSum)
+oscMain = ta.ema(oscRaw, smoothLen)
+oscSlow = ta.ema(oscMain, slowLen)
+
+// Histograma de presión inmediata.
+histCore = ta.ema(rawPressure, histLen)
+histSd   = ta.stdev(histCore, normLen)
+histVal  = histSd > 0 ? 100.0 * f_tanh(histCore / histSd) : 0.0
+
+// Dominio con histéresis: solo cambia al cruzar ±umbral.
+var int domain = 0
+prevDomain = domain
+if oscMain > domThresh
+    domain := 1
+else if oscMain < -domThresh
+    domain := -1
+
+domFlipBull  = domain == 1  and prevDomain != 1 and prevDomain != 0
+domFlipBear  = domain == -1 and prevDomain != -1 and prevDomain != 0
+inTransition = domain != 0 and math.abs(oscMain) < domThresh
+
+// Fuerza en % para el panel: 50% = equilibrio.
+buyerPct  = (oscMain + 100.0) / 2.0
+sellerPct = 100.0 - buyerPct
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 3. AGOTAMIENTO (posible techo / suelo)
+// ═════════════════════════════════════════════════════════════════════════════
+// Solo puntúa cuando el precio está en extremos (confluencia obligatoria):
+// a) el flujo pierde fuerza vs su pico, b) el momentum se desacelera,
+// c) el precio está excesivamente expandido respecto a su media.
+
+priceAtHigh = high >= ta.highest(high, exhLen)
+priceAtLow  = low  <= ta.lowest(low,  exhLen)
+
+oscPeak   = ta.highest(oscMain, exhLen)
+oscTrough = ta.lowest(oscMain, exhLen)
+fadeBull  = f_clamp((oscPeak - oscMain) / 50.0, 0.0, 1.0)
+fadeBear  = f_clamp((oscMain - oscTrough) / 50.0, 0.0, 1.0)
+
+momSlope  = momZ - momZ[3]
+decelBull = f_clamp(-momSlope, 0.0, 1.0)
+decelBear = f_clamp( momSlope, 0.0, 1.0)
+
+extMa   = ta.sma(close, extLen)
+ext     = atrVal > 0 ? (close - extMa) / atrVal : 0.0
+extBull = f_clamp( ext / extThresh, 0.0, 1.0)
+extBear = f_clamp(-ext / extThresh, 0.0, 1.0)
+
+exhBullScore = priceAtHigh ? 100.0 * (0.40 * fadeBull + 0.35 * decelBull + 0.25 * extBull) : 0.0
+exhBearScore = priceAtLow  ? 100.0 * (0.40 * fadeBear + 0.35 * decelBear + 0.25 * extBear) : 0.0
+
+var int lastExhBullBar = -99999
+var int lastExhBearBar = -99999
+exhBullSignal = exhBullScore >= exhThresh and bar_index - lastExhBullBar > exhCool
+exhBearSignal = exhBearScore >= exhThresh and bar_index - lastExhBearBar > exhCool
+if exhBullSignal
+    lastExhBullBar := bar_index
+if exhBearSignal
+    lastExhBearBar := bar_index
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 4. DIVERGENCIAS — dibujadas en el PRECIO (force_overlay) y en el OSCILADOR
+// ═════════════════════════════════════════════════════════════════════════════
+// Pivots detectados en el oscilador, confirmados pivRight barras después.
+// Filtro de calidad adaptativo: magnitudes medidas en unidades de volatilidad
+// reciente (stdev del oscilador, ATR del precio) → mismo ajuste sirve en
+// cualquier activo y temporalidad.
+
+oscSd = ta.stdev(oscMain, normLen)
+
+ph = ta.pivothigh(oscMain, pivLeft, pivRight)
+pl = ta.pivotlow(oscMain,  pivLeft, pivRight)
+
+var float phOscPrev   = na
+var float phPricePrev = na
+var int   phBarPrev   = na
+var float plOscPrev   = na
+var float plPricePrev = na
+var int   plBarPrev   = na
+
+bool divBull = false
+bool divBear = false
+bool divBullHidden = false
+bool divBearHidden = false
+float divQuality = 0.0
+
+f_divQuality(float dOsc, float dPrice, int dBars) =>
+    qOsc   = f_clamp(dOsc / math.max(oscSd * 1.5, 1e-10), 0.0, 1.0)
+    qPrice = f_clamp(dPrice / math.max(atrVal * 1.5, 1e-10), 0.0, 1.0)
+    mid    = (divMinBars + divMaxBars) / 2.0
+    qBars  = 1.0 - f_clamp(math.abs(dBars - mid) / math.max(mid, 1.0), 0.0, 0.6)
+    100.0 * (0.50 * qOsc + 0.30 * qPrice + 0.20 * qBars)
+
+// Dibuja una divergencia en ambos lienzos: precio (gráfico) y oscilador (panel).
+f_drawDiv(int b1, float p1, float o1, int b2, float p2, float o2, color col, bool dashed, string txt, bool isBull) =>
+    sty = dashed ? line.style_dashed : line.style_solid
+    if showDivPrice
+        line.new(b1, p1, b2, p2, color = col, width = dashed ? 1 : 2, style = sty, force_overlay = true)
+        if not dashed
+            label.new(b2, p2, txt,
+                 style = isBull ? label.style_label_up : label.style_label_down,
+                 color = color.new(col, 15), textcolor = color.white, size = size.small,
+                 force_overlay = true)
+    if showDivPane
+        line.new(b1, o1, b2, o2, color = col, width = dashed ? 1 : 2, style = sty)
+
+// ── Pivots altos: divergencias bajistas ──────────────────────────────────────
+if not na(ph)
+    oscNow   = oscMain[pivRight]
+    priceNow = high[pivRight]
+    barNow   = bar_index - pivRight
+    if not na(phOscPrev)
+        dBars = barNow - phBarPrev
+        if dBars >= divMinBars and dBars <= divMaxBars
+            // Regular bajista: máximo más alto en precio, máximo más bajo en flujo.
+            if priceNow > phPricePrev and oscNow < phOscPrev
+                q = f_divQuality(phOscPrev - oscNow, priceNow - phPricePrev, dBars)
+                if q >= divMinQual
+                    divBear := true
+                    divQuality := q
+                    f_drawDiv(phBarPrev, phPricePrev, phOscPrev, barNow, priceNow, oscNow,
+                         cBear, false, "El precio sube\nsin respaldo 📉", false)
+            // Oculta bajista (continuación) — opcional.
+            if showHidden and priceNow < phPricePrev and oscNow > phOscPrev
+                q = f_divQuality(oscNow - phOscPrev, phPricePrev - priceNow, dBars)
+                if q >= divMinQual
+                    divBearHidden := true
+                    divQuality := math.max(divQuality, q)
+                    f_drawDiv(phBarPrev, phPricePrev, phOscPrev, barNow, priceNow, oscNow,
+                         cHidden, true, "", false)
+    phOscPrev   := oscNow
+    phPricePrev := priceNow
+    phBarPrev   := barNow
+
+// ── Pivots bajos: divergencias alcistas ──────────────────────────────────────
+if not na(pl)
+    oscNow   = oscMain[pivRight]
+    priceNow = low[pivRight]
+    barNow   = bar_index - pivRight
+    if not na(plOscPrev)
+        dBars = barNow - plBarPrev
+        if dBars >= divMinBars and dBars <= divMaxBars
+            // Regular alcista: mínimo más bajo en precio, mínimo más alto en flujo.
+            if priceNow < plPricePrev and oscNow > plOscPrev
+                q = f_divQuality(oscNow - plOscPrev, plPricePrev - priceNow, dBars)
+                if q >= divMinQual
+                    divBull := true
+                    divQuality := q
+                    f_drawDiv(plBarPrev, plPricePrev, plOscPrev, barNow, priceNow, oscNow,
+                         cBull, false, "El precio cae pero\nentra dinero 📈", true)
+            // Oculta alcista (continuación) — opcional.
+            if showHidden and priceNow > plPricePrev and oscNow < plOscPrev
+                q = f_divQuality(plOscPrev - oscNow, priceNow - plPricePrev, dBars)
+                if q >= divMinQual
+                    divBullHidden := true
+                    divQuality := math.max(divQuality, q)
+                    f_drawDiv(plBarPrev, plPricePrev, plOscPrev, barNow, priceNow, oscNow,
+                         cHidden, true, "", true)
+    plOscPrev   := oscNow
+    plPricePrev := priceNow
+    plBarPrev   := barNow
+
+anyDivBull = divBull or divBullHidden
+anyDivBear = divBear or divBearHidden
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 5. CONFLUENCIA Y SEÑALES PRINCIPALES
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Calor de divergencia: se carga con la calidad y se desvanece barra a barra.
+var float divHeat = 0.0
+divHeat := divHeat * 0.94
+if anyDivBull or anyDivBear
+    divHeat := math.max(divHeat, divQuality)
+
+confFlow = math.abs(oscMain) / 100.0
+confMom  = (momZ > 0) == (oscMain > 0) ? f_clamp(math.abs(momZ) / 2.0, 0.0, 1.0) : 0.0
+confDiv  = divHeat / 100.0
+confExh  = math.max(exhBullScore, exhBearScore) / 100.0
+confluence = 100.0 * (0.30 * confFlow + 0.20 * confMom + 0.30 * confDiv + 0.20 * confExh)
+
+// Flechas grandes: cambio de bando con confluencia suficiente (filtro del preset).
+buyArrow  = showArrows and domFlipBull and confluence >= confMin
+sellArrow = showArrows and domFlipBear and confluence >= confMin
+
+// Color progresivo de confluencia: gris → ámbar → color del bando dominante.
+confBase  = domain >= 0 ? cBull : cBear
+confColor = confluence < 50.0 ?
+     color.from_gradient(confluence, 0.0, 50.0, color.new(cNeutral, 60), color.new(cWarn, 20)) :
+     color.from_gradient(confluence, 50.0, 100.0, color.new(cWarn, 20), color.new(confBase, 0))
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. VISUALIZACIÓN — PANEL INFERIOR (oscilador)
+// ═════════════════════════════════════════════════════════════════════════════
+
+hline(0,   "Cero",        color = color.new(cNeutral, 50), linestyle = hline.style_dotted)
+hline(60,  "Sobrecompra", color = color.new(cBear, 70),    linestyle = hline.style_dashed)
+hline(-60, "Sobreventa",  color = color.new(cBull, 70),    linestyle = hline.style_dashed)
+
+histColor = histVal >= 0 ?
+     (histVal >= histVal[1] ? color.new(cBull, 55) : color.new(cBull, 75)) :
+     (histVal <= histVal[1] ? color.new(cBear, 55) : color.new(cBear, 75))
+plot(showHist ? histVal : na, "Histograma de presión", style = plot.style_columns, color = histColor)
+
+oscColor = inTransition ? cNeutral : domain == 1 ? cBull : domain == -1 ? cBear : cNeutral
+pMain = plot(oscMain, "Flujo de capital", color = oscColor, linewidth = 2)
+pSlow = plot(oscSlow, "Tendencia lenta",  color = color.new(cSlow, 0), linewidth = 1)
+pZero = plot(0, "", color = na, display = display.none, editable = false)
+fill(pMain, pZero, color = oscMain >= 0 ? color.new(cBull, 85) : color.new(cBear, 85), title = "Relleno de dominio")
+
+// Tira de confluencia (base del panel) con colores progresivos.
+plotshape(showConf, "Confluencia", style = shape.square, location = location.bottom,
+     color = confColor, size = size.tiny)
+
+// Fondo del panel (opcional).
+bgcolor(showBgPane and domain == 1  ? color.new(cBull, 92) : na, title = "Fondo panel comprador")
+bgcolor(showBgPane and domain == -1 ? color.new(cBear, 92) : na, title = "Fondo panel vendedor")
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 7. VISUALIZACIÓN — SOBRE EL GRÁFICO (force_overlay)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Velas coloreadas por intensidad del flujo (barcolor actúa sobre el gráfico
+// principal aunque el indicador viva en un panel).
+candleCol = oscMain > 15 ? color.from_gradient(oscMain, 15, 80, color.new(cBull, 45), cBull) :
+     oscMain < -15 ? color.from_gradient(oscMain, -80, -15, cBear, color.new(cBear, 45)) :
+     cNeutral
+barcolor(showCandles ? candleCol : na, title = "Velas según flujo")
+
+// Fondo suave del gráfico principal según dominio.
+bgcolor(showBgChart and domain == 1  ? color.new(cBull, 94) : na, title = "Fondo gráfico comprador", force_overlay = true)
+bgcolor(showBgChart and domain == -1 ? color.new(cBear, 94) : na, title = "Fondo gráfico vendedor",  force_overlay = true)
+
+// Flechas de cambio de bando, sobre las velas.
+plotshape(buyArrow, "Compradores toman el control", style = shape.labelup,
+     location = location.belowbar, color = cBull, textcolor = color.white,
+     text = "COMPRADORES\nAL CONTROL", size = size.small, force_overlay = true)
+plotshape(sellArrow, "Vendedores toman el control", style = shape.labeldown,
+     location = location.abovebar, color = cBear, textcolor = color.white,
+     text = "VENDEDORES\nAL CONTROL", size = size.small, force_overlay = true)
+
+// Avisos de agotamiento sobre las velas.
+plotshape(showExhChart and exhBullSignal, "Posible techo", style = shape.triangledown,
+     location = location.abovebar, color = cWarn, text = "⚠ techo?",
+     textcolor = cWarn, size = size.tiny, force_overlay = true)
+plotshape(showExhChart and exhBearSignal, "Posible suelo", style = shape.triangleup,
+     location = location.belowbar, color = cWarn, text = "⚠ suelo?",
+     textcolor = cWarn, size = size.tiny, force_overlay = true)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 8. PANEL "¿QUIÉN MANDA?"
+// ═════════════════════════════════════════════════════════════════════════════
+
+panelPosition = switch panelPos
+    "Arriba derecha"   => position.top_right
+    "Arriba izquierda" => position.top_left
+    "Abajo derecha"    => position.bottom_right
+    => position.bottom_left
+
+txtSize = switch panelSize
+    "Compacto" => size.tiny
+    "Grande"   => size.normal
+    => size.small
+hdrSize = switch panelSize
+    "Compacto" => size.small
+    "Grande"   => size.large
+    => size.normal
+
+var table panel = table.new(panelPosition, 2, 10, bgcolor = color.new(#131722, 10),
+     border_width = 1, border_color = color.new(#363a45, 0), frame_width = 2,
+     frame_color = color.new(#363a45, 0))
+
+// Memoria de la última divergencia (para la fila técnica del panel).
+var string lastDivTxt = "—"
+var color  lastDivCol = cNeutral
+if divBull
+    lastDivTxt := "Alcista (" + str.tostring(divQuality, "#") + ")"
+    lastDivCol := cBull
+else if divBear
+    lastDivTxt := "Bajista (" + str.tostring(divQuality, "#") + ")"
+    lastDivCol := cBear
+else if divBullHidden
+    lastDivTxt := "Alcista oculta (" + str.tostring(divQuality, "#") + ")"
+    lastDivCol := cHidden
+else if divBearHidden
+    lastDivTxt := "Bajista oculta (" + str.tostring(divQuality, "#") + ")"
+    lastDivCol := cHidden
+
+if showPanel and barstate.islast
+    domTxt = inTransition ? "⚪ INDECISIÓN" : domain == 1 ? "🟢 COMPRADORES" : domain == -1 ? "🔴 VENDEDORES" : "⚪ SIN DEFINIR"
+    domCol = inTransition ? cNeutral : domain == 1 ? cBull : domain == -1 ? cBear : cNeutral
+
+    exhMax  = math.max(exhBullScore, exhBearScore)
+    riskTxt = exhMax >= exhThresh ? "🔥 ALTO" : exhMax >= exhThresh * 0.6 ? "⚠ MEDIO" : "✓ BAJO"
+    riskCol = exhMax >= exhThresh ? cWarn : exhMax >= exhThresh * 0.6 ? color.new(cWarn, 30) : cNeutral
+
+    momTxt = momSlope > 0.15 ? "↑ Acelerando" : momSlope < -0.15 ? "↓ Frenando" : "→ Estable"
+    momCol = momSlope > 0.15 ? cBull : momSlope < -0.15 ? cBear : cNeutral
+
+    // Lectura final: UNA frase que resume todo.
+    lectura = exhBullScore >= exhThresh ? "Subida estirada: vigila un posible techo" :
+         exhBearScore >= exhThresh ? "Caída estirada: vigila un posible suelo" :
+         divHeat >= divMinQual and oscMain > 0 ? "Entra dinero: posible giro al alza" :
+         divHeat >= divMinQual and oscMain < 0 ? "Sale dinero: posible giro a la baja" :
+         domain == 1 and not inTransition ? "Los compradores tienen el control" :
+         domain == -1 and not inTransition ? "Los vendedores tienen el control" :
+         "Mercado indeciso: mejor esperar"
+    lecturaCol = exhMax >= exhThresh ? cWarn : domain == 1 ? cBull : domain == -1 ? cBear : cNeutral
+
+    table.cell(panel, 0, 0, "💰 ¿QUIÉN MANDA?", text_color = color.white, text_size = hdrSize, bgcolor = color.new(#2a2e39, 0))
+    table.cell(panel, 1, 0, domTxt,             text_color = domCol,      text_size = hdrSize, bgcolor = color.new(#2a2e39, 0))
+
+    table.cell(panel, 0, 1, "Compradores",     text_color = cBull, text_size = txtSize)
+    table.cell(panel, 1, 1, f_bar(buyerPct) + " " + str.tostring(buyerPct, "#") + "%",  text_color = cBull, text_size = txtSize)
+
+    table.cell(panel, 0, 2, "Vendedores",      text_color = cBear, text_size = txtSize)
+    table.cell(panel, 1, 2, f_bar(sellerPct) + " " + str.tostring(sellerPct, "#") + "%", text_color = cBear, text_size = txtSize)
+
+    table.cell(panel, 0, 3, "Momentum",        text_color = cNeutral, text_size = txtSize)
+    table.cell(panel, 1, 3, momTxt,            text_color = momCol,   text_size = txtSize)
+
+    table.cell(panel, 0, 4, "Riesgo de giro",  text_color = cNeutral, text_size = txtSize)
+    table.cell(panel, 1, 4, riskTxt,           text_color = riskCol,  text_size = txtSize)
+
+    table.cell(panel, 0, 5, "Confianza señal", text_color = cNeutral, text_size = txtSize)
+    table.cell(panel, 1, 5, f_bar(confluence) + " " + str.tostring(confluence, "#") + "%", text_color = confluence >= confMin ? cWarn : cNeutral, text_size = txtSize)
+
+    table.cell(panel, 0, 6, "Lectura",         text_color = cNeutral,   text_size = txtSize)
+    table.cell(panel, 1, 6, lectura,           text_color = lecturaCol, text_size = txtSize)
+
+    // Filas técnicas opcionales (para quien quiera los números).
+    if panelTech
+        table.cell(panel, 0, 7, "Flujo / Lenta",  text_color = cNeutral, text_size = txtSize)
+        table.cell(panel, 1, 7, str.tostring(oscMain, "#.#") + " / " + str.tostring(oscSlow, "#.#"),
+             text_color = oscMain >= 0 ? cBull : cBear, text_size = txtSize)
+        table.cell(panel, 0, 8, "Agotamiento",    text_color = cNeutral, text_size = txtSize)
+        table.cell(panel, 1, 8, "Techo " + str.tostring(exhBullScore, "#") + " · Suelo " + str.tostring(exhBearScore, "#"),
+             text_color = exhMax >= exhThresh ? cWarn : cNeutral, text_size = txtSize)
+        table.cell(panel, 0, 9, "Últ. diverg.",   text_color = cNeutral, text_size = txtSize)
+        table.cell(panel, 1, 9, lastDivTxt + (hasVol ? "" : "  (sin vol.)"), text_color = lastDivCol, text_size = txtSize)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 9. ALERTAS
+// ═════════════════════════════════════════════════════════════════════════════
+// Configurar como "Una vez por barra (al cierre)".
+
+alertcondition(domFlipBull, "SMF-C: Compradores toman el control",
+     "SMF Complete | {{ticker}} {{interval}}: los COMPRADORES toman el control.")
+alertcondition(domFlipBear, "SMF-C: Vendedores toman el control",
+     "SMF Complete | {{ticker}} {{interval}}: los VENDEDORES toman el control.")
+alertcondition(divBull, "SMF-C: Posible giro al alza (divergencia)",
+     "SMF Complete | {{ticker}} {{interval}}: el precio cae pero entra dinero — posible giro al alza.")
+alertcondition(divBear, "SMF-C: Posible giro a la baja (divergencia)",
+     "SMF Complete | {{ticker}} {{interval}}: el precio sube sin respaldo — posible giro a la baja.")
+alertcondition(exhBullSignal, "SMF-C: Posible techo (agotamiento)",
+     "SMF Complete | {{ticker}} {{interval}}: la subida muestra agotamiento — posible techo.")
+alertcondition(exhBearSignal, "SMF-C: Posible suelo (agotamiento)",
+     "SMF Complete | {{ticker}} {{interval}}: la caída muestra agotamiento — posible suelo.")
