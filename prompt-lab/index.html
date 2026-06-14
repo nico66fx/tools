@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="es" class="scroll-smooth">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quant Prompt Lab · Generador de prompts para Claude · nico66fx</title>
+    <meta
+      name="description"
+      content="Genera prompts profesionales y seguros para crear robots (EA) e indicadores de trading con Claude. Seguridad y validación incluidas. 100% en tu navegador, sin API."
+    />
+    <meta name="theme-color" content="#0a0f1d" />
+    <meta property="og:title" content="Quant Prompt Lab · nico66fx" />
+    <meta property="og:description" content="Prompts de trading honestos y optimizados para Claude. Robot e indicador, seguros por defecto y con plan de validación. Gratis y 100% local." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://nico66fx.github.io/tools/prompt-lab/" />
+
+    <link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Sora:wght@600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'ui-sans-serif', 'system-ui'],
+              display: ['Sora', 'Inter', 'ui-sans-serif'],
+              mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+            },
+            colors: {
+              base: '#0a0f1d',
+              surface: '#0b1220',
+              brand: { DEFAULT: '#3b82f6', 400: '#60a5fa', 500: '#3b82f6', 600: '#2563eb' },
+              accent: { DEFAULT: '#22d3ee', 400: '#22d3ee', 500: '#06b6d4' },
+            },
+          },
+        },
+      };
+    </script>
+
+    <style>
+      :root { --border: rgba(255, 255, 255, 0.1); }
+      html, body { font-feature-settings: 'ss01', 'cv11', 'cv02'; }
+      body {
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        letter-spacing: -0.005em;
+        background-color: #0a0f1d;
+        color: #e2e8f0;
+        background-image: radial-gradient(1200px 600px at 85% -10%, rgba(59, 130, 246, 0.12), transparent 60%),
+          radial-gradient(900px 500px at 0% 0%, rgba(6, 182, 212, 0.1), transparent 55%);
+        background-attachment: fixed;
+      }
+      h1, h2, h3, h4, .display { font-family: 'Sora', Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.025em; }
+      h1 { letter-spacing: -0.04em; }
+      .eyebrow { font-size: 0.72rem; letter-spacing: 0.22em; text-transform: uppercase; font-weight: 600; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-track { background: #0b1220; }
+      ::-webkit-scrollbar-thumb { background: linear-gradient(180deg, #3b82f6, #06b6d4); border-radius: 9999px; }
+      .text-gradient { background: linear-gradient(135deg, #60a5fa, #22d3ee); -webkit-background-clip: text; background-clip: text; color: transparent; }
+      .card-glass {
+        border: 1px solid var(--border);
+        background: linear-gradient(145deg, rgba(31, 41, 55, 0.55), rgba(17, 24, 39, 0.55));
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.24);
+        backdrop-filter: blur(18px);
+      }
+      .btn-primary {
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+        border-radius: 9999px; background: linear-gradient(135deg, #3b82f6, #06b6d4);
+        color: #fff; font-weight: 800; padding: 0.6rem 1.2rem; cursor: pointer;
+        transition: transform 180ms ease, box-shadow 180ms ease, filter 180ms ease;
+        box-shadow: 0 14px 38px rgba(59, 130, 246, 0.28); border: none;
+      }
+      .btn-primary:hover { transform: translateY(-2px); filter: brightness(1.08); box-shadow: 0 18px 50px rgba(59, 130, 246, 0.42); }
+      .btn-secondary {
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+        border-radius: 9999px; border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(17, 24, 39, 0.72); color: #e5e7eb; font-weight: 700; padding: 0.55rem 1.05rem; cursor: pointer;
+        transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+      }
+      .btn-secondary:hover { border-color: rgba(96, 165, 250, 0.55); background: rgba(31, 41, 55, 0.92); transform: translateY(-1px); }
+      .glow-dot { width: 6px; height: 6px; border-radius: 9999px; background: #22d3ee; box-shadow: 0 0 12px #22d3ee; display: inline-block; }
+
+      /* Controles de formulario */
+      .lbl { display:block; font-size:0.72rem; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color:#94a3b8; margin-bottom:0.4rem; }
+      .field {
+        width:100%; border-radius:0.75rem; border:1px solid rgba(255,255,255,0.12);
+        background:rgba(2,6,23,0.55); color:#e2e8f0; padding:0.6rem 0.8rem; font-size:0.9rem;
+        transition:border-color .18s ease, box-shadow .18s ease;
+      }
+      .field:focus { outline:none; border-color:rgba(96,165,250,0.7); box-shadow:0 0 0 3px rgba(59,130,246,0.18); }
+      textarea.field { resize:vertical; min-height:5.5rem; line-height:1.5; }
+      select.field { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%2394a3b8' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 0.7rem center; padding-right:2rem; }
+
+      /* Chips multi-selección */
+      .chip {
+        display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer; user-select:none;
+        border-radius:9999px; border:1px solid rgba(255,255,255,0.14); background:rgba(17,24,39,0.5);
+        color:#cbd5e1; font-size:0.8rem; font-weight:600; padding:0.4rem 0.8rem;
+        transition:all .15s ease;
+      }
+      .chip:hover { border-color:rgba(96,165,250,0.5); color:#fff; }
+      .chip.active { background:linear-gradient(135deg, rgba(59,130,246,0.22), rgba(6,182,212,0.22)); border-color:rgba(96,165,250,0.7); color:#fff; }
+      .chip.warn.active { background:rgba(245,158,11,0.16); border-color:rgba(245,158,11,0.6); color:#fcd34d; }
+
+      /* Tabs de modo */
+      .tab { cursor:pointer; padding:0.6rem 1rem; border-radius:0.75rem; font-weight:700; font-size:0.9rem; color:#94a3b8; transition:all .15s ease; }
+      .tab.active { background:linear-gradient(135deg, rgba(59,130,246,0.2), rgba(6,182,212,0.2)); color:#fff; box-shadow:inset 0 0 0 1px rgba(96,165,250,0.4); }
+
+      /* Checkbox seguridad */
+      .safety { display:flex; gap:0.6rem; align-items:flex-start; padding:0.55rem 0.65rem; border-radius:0.65rem; transition:background .15s ease; cursor:pointer; }
+      .safety:hover { background:rgba(255,255,255,0.03); }
+      .safety input { margin-top:0.15rem; width:1.05rem; height:1.05rem; accent-color:#22d3ee; flex:none; }
+      .safety span { font-size:0.83rem; color:#cbd5e1; line-height:1.35; }
+
+      .out { font-family:'JetBrains Mono', ui-monospace, monospace; font-size:0.78rem; line-height:1.55; white-space:pre-wrap; word-break:break-word; color:#cbd5e1; }
+      .toast { position:fixed; bottom:1.25rem; left:50%; transform:translateX(-50%) translateY(120%); background:linear-gradient(135deg,#3b82f6,#06b6d4); color:#fff; font-weight:700; padding:0.6rem 1.2rem; border-radius:9999px; box-shadow:0 18px 45px rgba(59,130,246,.4); transition:transform .3s ease; z-index:80; }
+      .toast.show { transform:translateX(-50%) translateY(0); }
+    </style>
+  </head>
+
+  <body class="min-h-screen flex flex-col">
+    <!-- Nav -->
+    <header class="sticky top-0 z-40 border-b border-white/10 bg-base/80 backdrop-blur-xl">
+      <div class="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 sm:px-6">
+        <a href="../" class="flex items-center gap-2.5">
+          <span class="flex h-9 w-9 items-center justify-center rounded-xl" style="box-shadow: 0 0 24px -4px rgba(59,130,246,.45)">
+            <svg viewBox="0 0 64 64" class="h-9 w-9">
+              <defs><linearGradient id="logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#3b82f6" /><stop offset="100%" stop-color="#22d3ee" /></linearGradient></defs>
+              <rect width="64" height="64" rx="16" fill="url(#logo)" />
+              <polyline points="12,46 26,30 36,38 54,14" fill="none" stroke="#0a0f1d" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+              <circle cx="54" cy="14" r="5" fill="#0a0f1d" />
+            </svg>
+          </span>
+          <span class="leading-tight">
+            <span class="block text-sm font-extrabold tracking-tight text-white">nico66fx · Tools</span>
+            <span class="block text-[10px] uppercase tracking-widest text-brand-400">Quant Prompt Lab</span>
+          </span>
+        </a>
+        <a href="../" class="btn-secondary ml-auto text-sm">← Todas las herramientas</a>
+      </div>
+    </header>
+
+    <main class="flex-1">
+      <!-- Hero -->
+      <section class="mx-auto max-w-4xl px-4 pt-12 pb-6 text-center sm:px-6">
+        <div class="eyebrow mb-3 text-accent-400">Optimizado para Claude · Opus 4.8</div>
+        <h1 class="text-3xl font-extrabold text-white sm:text-4xl">
+          Quant <span class="text-gradient">Prompt Lab</span>
+        </h1>
+        <p class="mx-auto mt-3 max-w-2xl text-slate-400">
+          Genera el <strong class="text-slate-200">prompt perfecto</strong> para que Claude te cree un robot (EA) o un indicador
+          de trading — <strong class="text-slate-200">seguro por defecto</strong> y con su <strong class="text-slate-200">plan de validación</strong>.
+          100% en tu navegador, sin API ni costes.
+        </p>
+      </section>
+
+      <section class="mx-auto grid max-w-7xl gap-6 px-4 pb-10 sm:px-6 lg:grid-cols-2">
+        <!-- ===================== FORMULARIO ===================== -->
+        <div class="card-glass rounded-2xl p-5 sm:p-6">
+          <!-- Modo -->
+          <div class="mb-5 grid grid-cols-2 gap-2 rounded-xl border border-white/10 bg-black/20 p-1.5">
+            <div class="tab active text-center" data-mode="robot">🤖 Robot / EA</div>
+            <div class="tab text-center" data-mode="indicador">📈 Indicador</div>
+          </div>
+
+          <!-- Comunes -->
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label class="lbl">Plataforma / lenguaje</label>
+              <select id="platform" class="field">
+                <option value="mql5">MetaTrader 5 (MQL5)</option>
+                <option value="mql4">MetaTrader 4 (MQL4)</option>
+                <option value="pine">TradingView (Pine v6)</option>
+              </select>
+            </div>
+            <div>
+              <label class="lbl">Instrumento</label>
+              <input id="symbol" class="field" value="XAUUSD" placeholder="XAUUSD, NAS100, EURUSD…" />
+            </div>
+            <div>
+              <label class="lbl">Temporalidad</label>
+              <select id="tf" class="field">
+                <option>M1</option><option>M5</option><option>M15</option><option>M30</option>
+                <option selected>H1</option><option>H4</option><option>D1</option>
+                <option value="cualquiera">Cualquiera / configurable</option>
+              </select>
+            </div>
+            <div data-only="robot">
+              <label class="lbl">Tipo de estrategia</label>
+              <select id="stype" class="field">
+                <option value="tendencia">Tendencia</option>
+                <option value="reversión a la media">Reversión a la media</option>
+                <option value="ruptura (breakout)">Ruptura (breakout)</option>
+                <option value="scalping">Scalping</option>
+                <option value="swing">Swing</option>
+                <option value="momentum">Momentum</option>
+                <option value="grid / martingala">Grid / Martingala ⚠</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <label class="lbl" id="descLbl">Describe tu estrategia (en tus palabras)</label>
+            <textarea id="desc" class="field" placeholder="Ej: Comprar cuando el precio rompe el máximo de las últimas 20 velas con la EMA200 por debajo, y vender en el caso contrario. Salir por ratio 1:2."></textarea>
+            <p class="mt-1.5 text-xs text-slate-500">Cuanto más claro lo cuentes, mejor será el prompt. No hace falta saber programar.</p>
+          </div>
+
+          <!-- ===== Bloque ROBOT ===== -->
+          <div data-only="robot">
+            <div class="mt-5">
+              <label class="lbl">Indicadores a usar</label>
+              <div id="indicators" class="flex flex-wrap gap-2"></div>
+            </div>
+
+            <div class="mt-5 grid gap-4 sm:grid-cols-2">
+              <div>
+                <label class="lbl">Tipo de orden de entrada</label>
+                <select id="order" class="field">
+                  <option value="a mercado">A mercado</option>
+                  <option value="orden límite (pullback)">Límite (pullback)</option>
+                  <option value="orden stop (tras ruptura)">Stop (tras ruptura)</option>
+                </select>
+              </div>
+              <div>
+                <label class="lbl">Stop Loss</label>
+                <select id="sl" class="field">
+                  <option value="por ATR (volatilidad)">Por ATR (volatilidad)</option>
+                  <option value="fijo en pips">Fijo en pips</option>
+                  <option value="en la estructura (swing reciente)">En la estructura (swing)</option>
+                  <option value="como % del precio">Como % del precio</option>
+                </select>
+              </div>
+              <div>
+                <label class="lbl">Tamaño de posición</label>
+                <select id="sizing" class="field">
+                  <option value="% de riesgo por operación">% de riesgo por operación</option>
+                  <option value="lote fijo">Lote fijo</option>
+                  <option value="% del balance">% del balance</option>
+                </select>
+              </div>
+              <div>
+                <label class="lbl">Take Profit / salidas</label>
+                <div id="exits" class="flex flex-wrap gap-2"></div>
+              </div>
+            </div>
+
+            <div class="mt-5">
+              <label class="lbl">Filtros y extras</label>
+              <div id="filters" class="flex flex-wrap gap-2"></div>
+            </div>
+          </div>
+
+          <!-- ===== Bloque INDICADOR ===== -->
+          <div data-only="indicador" class="hidden">
+            <div class="mt-5">
+              <label class="lbl">Qué debe mostrar / detectar</label>
+              <div id="visuals" class="flex flex-wrap gap-2"></div>
+            </div>
+            <div class="mt-5">
+              <label class="lbl">Extras</label>
+              <div id="iextras" class="flex flex-wrap gap-2"></div>
+            </div>
+          </div>
+
+          <!-- ===== Seguridad (diferenciador) ===== -->
+          <div class="mt-6 rounded-xl border border-accent/25 bg-accent/5 p-4">
+            <div class="mb-2 flex items-center gap-2">
+              <svg viewBox="0 0 24 24" class="h-5 w-5 text-accent-400" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6Z" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <h3 class="text-sm font-bold text-white">Seguridad y honestidad <span class="font-normal text-slate-400">(lo que nos diferencia)</span></h3>
+            </div>
+            <div id="safety" class="grid gap-0.5 sm:grid-cols-2"></div>
+          </div>
+        </div>
+
+        <!-- ===================== SALIDA ===================== -->
+        <div class="flex flex-col gap-6 lg:sticky lg:top-20 lg:self-start">
+          <div class="card-glass rounded-2xl p-5 sm:p-6">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <h3 class="flex items-center gap-2 text-base font-bold text-white">
+                <span class="h-4 w-1 rounded-full bg-brand"></span> Tu prompt para Claude
+              </h3>
+              <button class="btn-primary text-sm" data-copy="promptMain">Copiar</button>
+            </div>
+            <div class="max-h-[46vh] overflow-auto rounded-xl border border-white/10 bg-black/30 p-4">
+              <div id="promptMain" class="out"></div>
+            </div>
+            <p class="mt-3 text-xs text-slate-500">
+              Pégalo en <a href="https://claude.ai" target="_blank" rel="noopener" class="text-accent-400 hover:underline">claude.ai</a>.
+              Recomendado <strong class="text-slate-300">Opus 4.8</strong> para mejor código.
+            </p>
+          </div>
+
+          <div class="card-glass rounded-2xl p-5 sm:p-6">
+            <div class="mb-3 flex items-center justify-between gap-3">
+              <h3 class="flex items-center gap-2 text-base font-bold text-white">
+                <span class="h-4 w-1 rounded-full bg-accent"></span> Prompt de validación <span class="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] font-semibold text-accent-400">FORENSE</span>
+              </h3>
+              <button class="btn-secondary text-sm" data-copy="promptValidate">Copiar</button>
+            </div>
+            <p class="mb-3 text-xs text-slate-400">Cuando Claude te dé el código, pega <em>este segundo prompt</em> + el código para que lo audite antes de arriesgar nada.</p>
+            <div class="max-h-[30vh] overflow-auto rounded-xl border border-white/10 bg-black/30 p-4">
+              <div id="promptValidate" class="out"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Disclaimer -->
+      <section class="mx-auto max-w-7xl px-4 pb-12 sm:px-6">
+        <div class="rounded-2xl border border-amber-400/40 bg-amber-400/10 px-5 py-4 text-sm leading-relaxed text-amber-100">
+          <strong class="text-amber-200">⚠ Uso experimental.</strong> El código que genere Claude es un punto de partida educativo:
+          revísalo, edítalo y <strong>NUNCA lo pongas en real sin tu propio backtest e investigación</strong>. No es asesoramiento
+          financiero y no nos responsabilizamos de las pérdidas. Esta herramienta solo crea texto en tu navegador: no ejecuta nada ni sube tus datos.
+        </div>
+      </section>
+    </main>
+
+    <footer class="border-t border-white/10 px-4 py-8 text-center text-xs text-slate-500 sm:px-6">
+      <div class="mx-auto mb-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
+        <a href="../" class="font-semibold text-slate-300 hover:text-brand-400">Herramientas</a>
+        <span class="text-slate-700">·</span>
+        <a href="https://nico66fx.github.io" target="_blank" rel="noopener" class="font-semibold text-slate-300 hover:text-brand-400">nico66fx.github.io</a>
+        <span class="text-slate-700">·</span>
+        <a href="https://t.me/cfcommfree" target="_blank" rel="noopener" class="font-semibold text-slate-300 hover:text-accent-400">Comunidad en Telegram</a>
+      </div>
+      <p class="text-slate-600">© nico66fx · Quant Prompt Lab · Generador de prompts 100% local</p>
+    </footer>
+
+    <div id="toast" class="toast">¡Copiado!</div>
+
+    <script>
+      // ───────────────────────── Estado ─────────────────────────
+      const state = {
+        mode: 'robot',
+        platform: 'mql5',
+        symbol: 'XAUUSD',
+        tf: 'H1',
+        stype: 'tendencia',
+        desc: '',
+        order: 'a mercado',
+        sl: 'por ATR (volatilidad)',
+        sizing: '% de riesgo por operación',
+        indicators: new Set(['EMA 200', 'RSI']),
+        exits: new Set(['TP por ratio riesgo/beneficio']),
+        filters: new Set(['Filtro de spread', 'Magic number']),
+        visuals: new Set(['Zonas / cajas en el gráfico', 'Etiquetas de señal']),
+        iextras: new Set(['Alertas']),
+        safety: new Set(),
+      };
+
+      const DATA = {
+        indicators: ['EMA / SMA', 'EMA 200', 'RSI', 'MACD', 'Bandas de Bollinger', 'ATR', 'ADX', 'Estocástico', 'VWAP', 'Supertrend', 'Ichimoku', 'Price Action', 'Soportes / Resistencias', 'Fibonacci', 'Volumen', 'Pivot Points'],
+        exits: ['TP fijo en pips', 'TP por ratio riesgo/beneficio', 'Trailing stop', 'Breakeven', 'Cierre parcial', 'Señal contraria', 'Cierre por tiempo'],
+        filters: ['Filtro de sesión (horario)', 'Filtro de días', 'Máximo de trades abiertos', 'Drawdown diario máximo', 'Filtro de spread', 'Solo compras', 'Solo ventas', 'Magic number', 'Panel en el gráfico', 'Alertas push'],
+        visuals: ['Zonas / cajas en el gráfico', 'Líneas / niveles', 'Flechas de señal', 'Etiquetas de señal', 'Coloreado de velas', 'Fondo según condición', 'Panel / tabla con datos'],
+        iextras: ['Alertas', 'Multi-timeframe (MTF)', 'Filtro de tendencia', 'Cuenta atrás de vela', 'Marca de agua / branding'],
+        safetyMQL: [
+          'Señales solo en barra cerrada (sin look-ahead ni repaint)',
+          'Stop Loss SIEMPRE presente en cada operación',
+          'Lotes normalizados a min/max/step (sin división por cero)',
+          'Comprobar el resultado de cada OrderSend / retcode',
+          'Control de spread y slippage',
+          'Sin martingala/grid sin tope de niveles',
+          'Liberar handles de indicadores en OnDeinit',
+          'Inputs agrupados y validados en OnInit',
+        ],
+        safetyPine: [
+          'Sin repaint: solo barras cerradas, sin barras futuras',
+          'Confirmar señales con barstate.isconfirmed',
+          'Nada de request.security con lookahead activado',
+          'Inputs configurables y bien agrupados',
+          'Declarar supuestos y limitaciones en comentarios',
+        ],
+      };
+
+      // ───────────────────────── Helpers UI ─────────────────────────
+      const $ = (id) => document.getElementById(id);
+
+      function chip(label, set, warn) {
+        const el = document.createElement('div');
+        el.className = 'chip' + (warn ? ' warn' : '') + (set.has(label) ? ' active' : '');
+        el.textContent = label;
+        el.onclick = () => { set.has(label) ? set.delete(label) : set.add(label); el.classList.toggle('active'); render(); };
+        return el;
+      }
+
+      function renderChips(containerId, list, set, warnList) {
+        const c = $(containerId); c.innerHTML = '';
+        list.forEach((l) => c.appendChild(chip(l, set, (warnList || []).includes(l))));
+      }
+
+      function renderSafety() {
+        const list = state.platform === 'pine' ? DATA.safetyPine : DATA.safetyMQL;
+        // por defecto todas activas la primera vez / al cambiar de plataforma
+        state.safety = new Set(list);
+        const c = $('safety'); c.innerHTML = '';
+        list.forEach((item) => {
+          const lab = document.createElement('label');
+          lab.className = 'safety';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.checked = true;
+          cb.onchange = () => { cb.checked ? state.safety.add(item) : state.safety.delete(item); render(); };
+          const sp = document.createElement('span'); sp.textContent = item;
+          lab.appendChild(cb); lab.appendChild(sp); c.appendChild(lab);
+        });
+      }
+
+      function applyModeVisibility() {
+        document.querySelectorAll('[data-only]').forEach((el) => {
+          el.classList.toggle('hidden', el.getAttribute('data-only') !== state.mode);
+        });
+        document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.mode === state.mode));
+        $('descLbl').textContent = state.mode === 'robot'
+          ? 'Describe tu estrategia (en tus palabras)'
+          : 'Describe qué quieres que mida o muestre el indicador';
+      }
+
+      // ───────────────────────── Generación del prompt ─────────────────────────
+      function platformInfo() {
+        switch (state.platform) {
+          case 'mql4': return { name: 'MetaTrader 4 (MQL4)', ext: '.mq4', robot: 'Expert Advisor (EA)', ind: 'indicador personalizado', lang: 'MQL4', isPine: false };
+          case 'pine': return { name: 'TradingView (Pine Script v6)', ext: '.pine', robot: 'estrategia (strategy())', ind: 'indicador (indicator())', lang: 'Pine Script v6', isPine: true };
+          default: return { name: 'MetaTrader 5 (MQL5)', ext: '.mq5', robot: 'Expert Advisor (EA)', ind: 'indicador personalizado', lang: 'MQL5 puro (sin capas MQL4)', isPine: false };
+        }
+      }
+
+      function bullets(set) { return [...set].map((x) => '- ' + x).join('\n') || '- (ninguno)'; }
+
+      function buildMain() {
+        const p = platformInfo();
+        const isRobot = state.mode === 'robot';
+        const target = isRobot ? p.robot : p.ind;
+        const desc = state.desc.trim() || (isRobot
+          ? '(describe aquí tu estrategia: cuándo comprar, cuándo vender y cómo salir)'
+          : '(describe aquí qué debe detectar o mostrar el indicador)');
+        const safety = bullets(state.safety);
+        const tf = state.tf === 'cualquiera' ? 'configurable por input (cualquier temporalidad)' : state.tf;
+
+        let out = '';
+        out += `Actúa como un desarrollador quant senior especializado en ${p.lang}. `;
+        out += `Tu tarea es escribir un ${target} completo, limpio y que COMPILE sin modificaciones.\n\n`;
+
+        out += `# CONTEXTO\n`;
+        out += `- Plataforma / lenguaje: ${p.name}\n`;
+        out += `- Instrumento: ${state.symbol || 'configurable'}\n`;
+        out += `- Temporalidad: ${tf}\n`;
+        if (isRobot) out += `- Tipo de estrategia: ${state.stype}\n`;
+        out += `\n# DESCRIPCIÓN\n${desc}\n\n`;
+
+        if (isRobot) {
+          out += `# LÓGICA DE ENTRADA\n`;
+          out += `- Indicadores: ${[...state.indicators].join(', ') || '(los que decidas según la descripción)'}\n`;
+          out += `- Tipo de orden: ${state.order}\n`;
+          out += `- Define con precisión las condiciones exactas de compra y de venta.\n\n`;
+
+          out += `# LÓGICA DE SALIDA\n${bullets(state.exits)}\n\n`;
+
+          out += `# GESTIÓN DE RIESGO\n`;
+          out += `- Stop Loss: ${state.sl}\n`;
+          out += `- Tamaño de posición: ${state.sizing}\n\n`;
+
+          out += `# FILTROS Y EXTRAS\n${bullets(state.filters)}\n\n`;
+        } else {
+          out += `# QUÉ DEBE MOSTRAR / DETECTAR\n${bullets(state.visuals)}\n\n`;
+          out += `# EXTRAS\n${bullets(state.iextras)}\n\n`;
+        }
+
+        out += `# REQUISITOS OBLIGATORIOS (no negociables)\n${safety}\n\n`;
+
+        out += `# FORMATO DE SALIDA\n`;
+        out += `- Devuelve ÚNICAMENTE el código ${p.ext} completo, sin explicaciones ni texto extra.\n`;
+        out += `- Código modular, comentado y con todos los inputs configurables y agrupados.\n`;
+        out += `- Marca con // TODO cualquier punto que requiera una decisión mía.\n`;
+        if (!p.isPine) out += `- Usa CTrade donde aplique, CopyBuffer/CopyRates correctamente y normaliza precios a Digits/Point.\n`;
+        return out;
+      }
+
+      function buildValidate() {
+        const p = platformInfo();
+        const isRobot = state.mode === 'robot';
+        let out = '';
+        out += `Actúa como un quant forense escéptico. Te paso el código de un ${isRobot ? p.robot : p.ind} generado por IA. `;
+        out += `NO lo elogies: tu trabajo es encontrarle los fallos antes de que arriesgue dinero.\n\n`;
+        out += `Analiza y respóndeme:\n\n`;
+        out += `1. RIESGOS DE EJECUCIÓN: ¿hay look-ahead / repaint? ¿usa la vela actual sin cerrar? `;
+        if (isRobot) out += `¿el sizing es peligroso? ¿falta Stop Loss? ¿comprueba el resultado de OrderSend? ¿división por cero?\n`;
+        else out += `¿repinta? ¿usa barras futuras o request.security con lookahead?\n`;
+        out += `2. REALISMO: ¿depende de spread bajo o condiciones ideales? ¿esconde martingala/grid? ¿sobreoptimización evidente?\n`;
+        if (isRobot) {
+          out += `3. PLAN DE VALIDACIÓN HONESTO: qué backtest hacer (periodo, calidad de datos/tick, spread realista), `;
+          out += `qué métricas mirar (Profit Factor, drawdown, expectancy, Sharpe/Sortino, nº de trades) y cómo detectar sobreajuste `;
+          out += `(in-sample vs out-of-sample, walk-forward, Monte Carlo del orden de operaciones).\n`;
+        } else {
+          out += `3. CÓMO PROBARLO: cómo comprobar que NO repinta (recargar y comparar señales históricas vs en vivo) y en qué casos falla.\n`;
+        }
+        out += `4. VEREDICTO claro y directo: ¿esto es plausible o tiene pinta de humo? Sin suavizar.\n\n`;
+        out += `[Pega aquí el código que te dio Claude]`;
+        return out;
+      }
+
+      function render() {
+        $('promptMain').textContent = buildMain();
+        $('promptValidate').textContent = buildValidate();
+      }
+
+      // ───────────────────────── Eventos ─────────────────────────
+      document.querySelectorAll('.tab').forEach((t) => {
+        t.onclick = () => { state.mode = t.dataset.mode; applyModeVisibility(); render(); };
+      });
+      $('platform').onchange = (e) => { state.platform = e.target.value; renderSafety(); render(); };
+      $('symbol').oninput = (e) => { state.symbol = e.target.value; render(); };
+      $('tf').onchange = (e) => { state.tf = e.target.value; render(); };
+      $('stype').onchange = (e) => { state.stype = e.target.value; render(); };
+      $('desc').oninput = (e) => { state.desc = e.target.value; render(); };
+      $('order').onchange = (e) => { state.order = e.target.value; render(); };
+      $('sl').onchange = (e) => { state.sl = e.target.value; render(); };
+      $('sizing').onchange = (e) => { state.sizing = e.target.value; render(); };
+
+      document.querySelectorAll('[data-copy]').forEach((b) => {
+        b.onclick = async () => {
+          const txt = $(b.dataset.copy).textContent;
+          try { await navigator.clipboard.writeText(txt); } catch (e) {
+            const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+          }
+          const t = $('toast'); t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1400);
+        };
+      });
+
+      // ───────────────────────── Init ─────────────────────────
+      renderChips('indicators', DATA.indicators, state.indicators);
+      renderChips('exits', DATA.exits, state.exits);
+      renderChips('filters', DATA.filters, state.filters);
+      renderChips('visuals', DATA.visuals, state.visuals);
+      renderChips('iextras', DATA.iextras, state.iextras);
+      renderSafety();
+      applyModeVisibility();
+      render();
+    </script>
+  </body>
+</html>
