@@ -1,0 +1,405 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © nico66fx
+//
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║   nico66fx — VOLUME PROFILE PRO · Day Trading Edition                 ║
+// ║   Session Volume Profile · POC/VAH/VAL · HVN/LVN · Delta · FVG        ║
+// ║   PDH/PDL · Bias · ATR · Pro Dashboard · Fully modular               ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+//@version=6
+indicator("nico66fx — Volume Profile Pro", shorttitle="nico66fx VP PRO", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 0 · INPUTS
+// ══════════════════════════════════════════════════════════════════════════
+grpP         = "◈ Volume Profile Engine"
+lookback     = input.int(200,  "Lookback (bars)",      minval=20, maxval=1000, group=grpP, tooltip="Confirmed bars used to build the profile.")
+numBins      = input.int(30,   "Bins (rows)",          minval=10, maxval=120,  group=grpP, tooltip="Vertical resolution of the profile.")
+vaPercent    = input.float(70, "Value Area %",         minval=50, maxval=95, step=5, group=grpP)
+distMode     = input.string("Range Spread", "Volume distribution", options=["Range Spread", "HLC3 Point"], group=grpP)
+profileWidth = input.int(80,   "Profile width (bars)", minval=10, maxval=300,  group=grpP)
+profileSide  = input.string("Right", "Profile anchor", options=["Right", "Left"], group=grpP)
+
+grpN     = "◈ HVN / LVN Nodes"
+showNodes= input.bool(true, "Show HVN / LVN",             group=grpN)
+hvnPct   = input.float(80, "HVN threshold (% of POC)",   minval=50, maxval=100, step=5, group=grpN)
+lvnPct   = input.float(20, "LVN threshold (% of POC)",   minval=1,  maxval=50,  step=1, group=grpN)
+maxNodes = input.int(12,   "Max node labels",            minval=1,  maxval=40, group=grpN)
+
+grpF        = "◈ Fair Value Gaps"
+showFVG     = input.bool(true, "Show FVG",           group=grpF)
+fvgMinAtr   = input.float(0.15,"Min FVG size (ATR)", minval=0, maxval=3, step=0.05, group=grpF)
+fvgFillClose= input.bool(true, "Remove filled FVG",  group=grpF)
+maxFvg      = input.int(15,  "Max FVGs on chart",   minval=1, maxval=100, group=grpF, tooltip="Only the most recent unfilled gaps are kept. Older ones are deleted automatically.")
+fvgExtBars  = input.int(15,  "Extend FVG (bars)",   minval=0, maxval=100, group=grpF)
+
+grpS       = "◈ Session Levels"
+showPDHPDL = input.bool(true, "Show PDH / PDL",       group=grpS)
+htfSession = input.timeframe("D", "Session timeframe", group=grpS)
+
+grpC   = "◈ Context"
+atrLen = input.int(14, "ATR length", minval=1, group=grpC)
+
+grpD     = "◈ Dashboard"
+showDash = input.bool(true,  "Show dashboard", group=grpD)
+dashPos  = input.string("Right", "Position", options=["Right","Left"], group=grpD)
+dashSize = input.string("Normal","Text size", options=["Tiny","Small","Normal","Large"], group=grpD)
+
+grpCol     = "◈ Colors"
+colUp      = input.color(color.new(#26a69a, 0),  "Buy volume",      group=grpCol)
+colDn      = input.color(color.new(#ef5350, 0),  "Sell volume",     group=grpCol)
+colVAfill  = input.color(color.new(#26a69a, 92), "Value Area fill", group=grpCol)
+colPOC     = input.color(color.new(#ffa726, 0),  "POC",             group=grpCol)
+colVA      = input.color(color.new(#42a5f5, 0),  "VAH / VAL",       group=grpCol)
+colHVN     = input.color(color.new(#ffffff, 0),  "HVN",             group=grpCol)
+colLVN     = input.color(color.new(#9e9e9e, 0),  "LVN",             group=grpCol)
+colFvgBull = input.color(color.new(#26a69a, 82), "FVG bull",        group=grpCol)
+colFvgBear = input.color(color.new(#ef5350, 82), "FVG bear",        group=grpCol)
+colPDH     = input.color(color.new(#ffb300, 0),  "PDH",             group=grpCol)
+colPDL     = input.color(color.new(#ffb300, 0),  "PDL",             group=grpCol)
+colDashBg  = input.color(color.new(#0e0e14, 8),  "Dash background", group=grpCol)
+colDashHd  = input.color(color.new(#ffa726, 0),  "Dash accent",     group=grpCol)
+colText    = input.color(color.new(#d1d4dc, 0),  "Dash text",       group=grpCol)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 1 · HELPERS  (all functions live at global scope)
+// ══════════════════════════════════════════════════════════════════════════
+f_txtSize(s) =>
+    switch s
+        "Tiny"  => size.tiny
+        "Small" => size.small
+        "Large" => size.large
+        => size.normal
+
+f_fmt(v) => na(v) ? "—" : str.tostring(v, format.mintick)
+
+f_hdr(t, r, txt, ts, hd) =>
+    table.merge_cells(t, 0, r, 1, r)
+    table.cell(t, 0, r, txt, text_color=hd, text_size=ts, text_halign=text.align_left, bgcolor=color.new(hd, 88))
+
+f_row(t, r, k, v, vc, ts, tc) =>
+    table.cell(t, 0, r, k, text_color=color.new(tc, 25), text_size=ts, text_halign=text.align_left)
+    table.cell(t, 1, r, v, text_color=vc, text_size=ts, text_halign=text.align_right)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 2 · CONTEXT (ATR · PDH/PDL · HTF)
+// ══════════════════════════════════════════════════════════════════════════
+atr = ta.atr(atrLen)
+pdh = request.security(syminfo.tickerid, htfSession, high[1], lookahead=barmerge.lookahead_off)
+pdl = request.security(syminfo.tickerid, htfSession, low[1],  lookahead=barmerge.lookahead_off)
+htfLabel = timeframe.period
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 3 · PROFILE COMPUTATION (last bar only → performant)
+// ══════════════════════════════════════════════════════════════════════════
+var float pocPrice = na
+var float vahPrice = na
+var float valPrice = na
+var float totVol   = na
+var float buyVol   = na
+var float sellVol  = na
+var int   lvnCount = 0
+var float rHi      = na
+var float rLo      = na
+
+var box[]   profBoxes  = array.new_box()
+var label[] nodeLabels = array.new_label()
+var line    pocLine    = na
+var line    vahLine    = na
+var line    valLine    = na
+var box     vaBox      = na
+var label   pocLbl     = na
+var label   vahLbl     = na
+var label   valLbl     = na
+
+f_clearProfile() =>
+    for b in profBoxes
+        box.delete(b)
+    array.clear(profBoxes)
+    for l in nodeLabels
+        label.delete(l)
+    array.clear(nodeLabels)
+
+if barstate.islast
+    f_clearProfile()
+
+    // --- 1. price extent over lookback -----------------------------------
+    depth = math.max(1, math.min(lookback, bar_index))
+    hi = high
+    lo = low
+    for i = 0 to depth - 1
+        hi := math.max(hi, high[i])
+        lo := math.min(lo, low[i])
+    rHi := hi
+    rLo := lo
+    rng = hi - lo
+
+    if rng > 0 and numBins > 0
+        binSz = rng / numBins
+        volB  = array.new_float(numBins, 0.0)
+        buyB  = array.new_float(numBins, 0.0)
+        sellB = array.new_float(numBins, 0.0)
+
+        // --- 2. accumulate volume + delta into bins ----------------------
+        for i = 0 to depth - 1
+            bh = high[i]
+            bl = low[i]
+            bc = close[i]
+            v  = nz(volume[i])
+            barRng = bh - bl
+            buyR = barRng > 0 ? (bc - bl) / barRng : 0.5
+            buyR := math.max(0.0, math.min(1.0, buyR))
+            sellR = 1.0 - buyR
+            if distMode == "HLC3 Point"
+                p  = (bh + bl + bc) / 3.0
+                bi = math.min(numBins - 1, math.max(0, int((p - lo) / binSz)))
+                array.set(volB,  bi, array.get(volB,  bi) + v)
+                array.set(buyB,  bi, array.get(buyB,  bi) + v * buyR)
+                array.set(sellB, bi, array.get(sellB, bi) + v * sellR)
+            else
+                loB = math.min(numBins - 1, math.max(0, int((bl - lo) / binSz)))
+                hiB = math.min(numBins - 1, math.max(0, int((bh - lo) / binSz)))
+                span = hiB - loB + 1
+                vPer = v / span
+                for bi = loB to hiB
+                    array.set(volB,  bi, array.get(volB,  bi) + vPer)
+                    array.set(buyB,  bi, array.get(buyB,  bi) + vPer * buyR)
+                    array.set(sellB, bi, array.get(sellB, bi) + vPer * sellR)
+
+        // --- 3. POC + totals ---------------------------------------------
+        pocIdx = 0
+        pocVol = 0.0
+        tv = 0.0
+        bv = 0.0
+        sv = 0.0
+        for bi = 0 to numBins - 1
+            cv = array.get(volB, bi)
+            tv += cv
+            bv += array.get(buyB, bi)
+            sv += array.get(sellB, bi)
+            if cv > pocVol
+                pocVol := cv
+                pocIdx := bi
+
+        pocPrice := lo + (pocIdx + 0.5) * binSz
+        totVol   := tv
+        buyVol   := bv
+        sellVol  := sv
+
+        // --- 4. Value Area (expand from POC to vaPercent) ----------------
+        vaTarget = tv * vaPercent / 100.0
+        vaVol = array.get(volB, pocIdx)
+        upI = pocIdx
+        dnI = pocIdx
+        stop = false
+        while vaVol < vaTarget and not stop
+            canUp = upI < numBins - 1
+            canDn = dnI > 0
+            if not canUp and not canDn
+                stop := true
+            else
+                upNext = canUp ? array.get(volB, upI + 1) : -1.0
+                dnNext = canDn ? array.get(volB, dnI - 1) : -1.0
+                if upNext >= dnNext
+                    upI += 1
+                    vaVol += upNext
+                else
+                    dnI -= 1
+                    vaVol += dnNext
+        vahPrice := lo + (upI + 1) * binSz
+        valPrice := lo + dnI * binSz
+
+        // --- 5. LVN count -------------------------------------------------
+        lc = 0
+        for bi = 0 to numBins - 1
+            if array.get(volB, bi) <= pocVol * lvnPct / 100.0
+                lc += 1
+        lvnCount := lc
+
+        // --- 6. DRAW profile bars ----------------------------------------
+        xAnchor = profileSide == "Right" ? bar_index + 2 : bar_index - depth - profileWidth - 2
+        dir     = profileSide == "Right" ? 1 : -1
+        for bi = 0 to numBins - 1
+            cv = array.get(volB, bi)
+            if cv > 0
+                wUnits = math.max(1, int(cv / pocVol * profileWidth))
+                yTop = lo + (bi + 1) * binSz
+                yBot = lo + bi * binSz
+                cb = array.get(buyB, bi)
+                cs = array.get(sellB, bi)
+                rowTot = cb + cs
+                buyW  = rowTot > 0 ? int(wUnits * cb / rowTot) : wUnits
+                sellW = wUnits - buyW
+                if buyW > 0
+                    array.push(profBoxes, box.new(xAnchor, yTop, xAnchor + dir * buyW, yBot, border_color=na, bgcolor=colUp))
+                if sellW > 0
+                    array.push(profBoxes, box.new(xAnchor + dir * buyW, yTop, xAnchor + dir * wUnits, yBot, border_color=na, bgcolor=colDn))
+                if showNodes and array.size(nodeLabels) < maxNodes
+                    yMid = (yTop + yBot) / 2
+                    lblStyle = profileSide == "Right" ? label.style_label_left : label.style_label_right
+                    if cv >= pocVol * hvnPct / 100.0 and bi != pocIdx
+                        array.push(nodeLabels, label.new(xAnchor + dir * (profileWidth + 3), yMid, "HVN", style=lblStyle, color=color.new(colHVN, 80), textcolor=colHVN, size=size.tiny))
+                    else if cv <= pocVol * lvnPct / 100.0
+                        array.push(nodeLabels, label.new(xAnchor + dir * (profileWidth + 3), yMid, "LVN", style=lblStyle, color=color.new(colLVN, 80), textcolor=colLVN, size=size.tiny))
+
+        // --- 7. DRAW POC / VAH / VAL / VA box ----------------------------
+        xL = bar_index - depth
+        xR = bar_index + 2
+        line.delete(pocLine)
+        line.delete(vahLine)
+        line.delete(valLine)
+        box.delete(vaBox)
+        label.delete(pocLbl)
+        label.delete(vahLbl)
+        label.delete(valLbl)
+        vaBox   := box.new(xL, vahPrice, xR, valPrice, border_color=na, bgcolor=colVAfill)
+        pocLine := line.new(xL, pocPrice, xR, pocPrice, color=colPOC, width=2)
+        vahLine := line.new(xL, vahPrice, xR, vahPrice, color=colVA,  width=1, style=line.style_dashed)
+        valLine := line.new(xL, valPrice, xR, valPrice, color=colVA,  width=1, style=line.style_dashed)
+        pocLbl  := label.new(xR, pocPrice, "POC " + f_fmt(pocPrice), style=label.style_label_left, color=colPOC, textcolor=color.black, size=size.small)
+        vahLbl  := label.new(xR, vahPrice, "VAH " + f_fmt(vahPrice), style=label.style_label_left, color=colVA,  textcolor=color.white, size=size.tiny)
+        valLbl  := label.new(xR, valPrice, "VAL " + f_fmt(valPrice), style=label.style_label_left, color=colVA,  textcolor=color.white, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 4 · FAIR VALUE GAPS
+// ══════════════════════════════════════════════════════════════════════════
+type FVG
+    box   b
+    float top
+    float bot
+    bool  bull
+    bool  filled
+
+var FVG[] fvgs = array.new<FVG>()
+var int   fvgBull = 0
+var int   fvgBear = 0
+var bool  priceInFvg = false
+
+if showFVG
+    bullGap = low > high[2]
+    bearGap = high < low[2]
+    gapSize = bullGap ? low - high[2] : bearGap ? low[2] - high : 0.0
+    if (bullGap or bearGap) and gapSize >= atr * fvgMinAtr
+        top = bullGap ? low : low[2]
+        bot = bullGap ? high[2] : high
+        nb  = box.new(bar_index - 1, top, bar_index + fvgExtBars, bot, border_color=na, bgcolor = bullGap ? colFvgBull : colFvgBear)
+        array.push(fvgs, FVG.new(nb, top, bot, bullGap, false))
+
+    // --- fill check on every confirmed bar + cap total count -------------
+    if barstate.isconfirmed and array.size(fvgs) > 0
+        for i = array.size(fvgs) - 1 to 0
+            f = array.get(fvgs, i)
+            if not f.filled and ((f.bull and close < f.bot) or (not f.bull and close > f.top))
+                f.filled := true
+                if fvgFillClose
+                    box.delete(f.b)
+                    array.remove(fvgs, i)
+                else
+                    box.set_bgcolor(f.b, color.new(color.gray, 92))
+    while array.size(fvgs) > maxFvg
+        old = array.shift(fvgs)
+        box.delete(old.b)
+
+if barstate.islast and showFVG
+    fvgBull := 0
+    fvgBear := 0
+    priceInFvg := false
+    if array.size(fvgs) > 0
+        for f in fvgs
+            if not f.filled
+                box.set_right(f.b, bar_index + fvgExtBars)
+                if f.bull
+                    fvgBull += 1
+                else
+                    fvgBear += 1
+                if close <= f.top and close >= f.bot
+                    priceInFvg := true
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 5 · SESSION LEVELS (PDH / PDL)
+// ══════════════════════════════════════════════════════════════════════════
+var line  pdhLine = na
+var line  pdlLine = na
+var label pdhLbl  = na
+var label pdlLbl  = na
+if showPDHPDL and barstate.islast
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    label.delete(pdhLbl)
+    label.delete(pdlLbl)
+    pdhLine := line.new(bar_index - 50, pdh, bar_index + 2, pdh, color=colPDH, width=1, style=line.style_dashed)
+    pdlLine := line.new(bar_index - 50, pdl, bar_index + 2, pdl, color=colPDL, width=1, style=line.style_dashed)
+    pdhLbl  := label.new(bar_index + 2, pdh, "PDH " + f_fmt(pdh), style=label.style_label_left, color=color.new(colPDH, 20), textcolor=color.black, size=size.tiny)
+    pdlLbl  := label.new(bar_index + 2, pdl, "PDL " + f_fmt(pdl), style=label.style_label_left, color=color.new(colPDL, 20), textcolor=color.black, size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 6 · DERIVED METRICS
+// ══════════════════════════════════════════════════════════════════════════
+buyPct  = totVol > 0 ? buyVol  / totVol * 100 : na
+sellPct = totVol > 0 ? sellVol / totVol * 100 : na
+delta   = totVol > 0 ? (buyVol - sellVol) / totVol * 100 : na
+bias    = na(delta) ? "—" : delta > 8 ? "BUYERS ▲" : delta < -8 ? "SELLERS ▼" : "BALANCED ▶"
+biasCol = na(delta) ? colText : delta > 8 ? colUp : delta < -8 ? colDn : color.gray
+
+priceInVA  = not na(vahPrice) and close <= vahPrice and close >= valPrice
+priceVsPoc = na(pocPrice) ? "—" : close > pocPrice ? "Above ▲" : close < pocPrice ? "Below ▼" : "At POC"
+pocDistAtr = (not na(pocPrice) and atr > 0) ? math.abs(close - pocPrice) / atr : na
+rangePos   = (not na(rHi) and rHi > rLo) ? (close - rLo) / (rHi - rLo) * 100 : na
+rangePosTxt= na(rangePos) ? "—" : str.tostring(rangePos, "#") + "% " + (rangePos >= 66 ? "upper" : rangePos <= 33 ? "lower" : "middle")
+sessPos    = na(pdh) or na(pdl) ? "—" : close > pdh ? "Above PDH ▲" : close < pdl ? "Below PDL ▼" : "Inside PDH/PDL"
+sessCol    = na(pdh) or na(pdl) ? colText : close > pdh ? colUp : close < pdl ? colDn : color.gray
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 7 · DASHBOARD
+// ══════════════════════════════════════════════════════════════════════════
+var table dash = na
+if showDash and barstate.islast
+    tPos = dashPos == "Right" ? position.top_right : position.top_left
+    dash := table.new(tPos, 2, 27, bgcolor=colDashBg, border_color=color.new(colDashHd, 60), border_width=1, frame_color=color.new(colDashHd, 40), frame_width=1)
+    ts = f_txtSize(dashSize)
+
+    table.merge_cells(dash, 0, 0, 1, 0)
+    table.cell(dash, 0, 0, "nico66fx — VP PRO", text_color=color.white, text_size=ts, bgcolor=color.new(colDashHd, 70))
+
+    f_hdr(dash, 1, "PROFILE", ts, colDashHd)
+    f_row(dash, 2, "POC", f_fmt(pocPrice), colPOC, ts, colText)
+    f_row(dash, 3, "VAH", f_fmt(vahPrice), colVA, ts, colText)
+    f_row(dash, 4, "VAL", f_fmt(valPrice), colVA, ts, colText)
+
+    f_hdr(dash, 5, "VOLUME", ts, colDashHd)
+    f_row(dash, 6, "Buy Vol",  na(buyPct)  ? "—" : str.tostring(buyPct, "0.0") + "%",  colUp, ts, colText)
+    f_row(dash, 7, "Sell Vol", na(sellPct) ? "—" : str.tostring(sellPct, "0.0") + "%", colDn, ts, colText)
+    f_row(dash, 8, "Delta",    na(delta)   ? "—" : (delta > 0 ? "+" : "") + str.tostring(delta, "0.0") + "%", delta >= 0 ? colUp : colDn, ts, colText)
+    f_row(dash, 9, "Bias",     bias, biasCol, ts, colText)
+
+    f_hdr(dash, 10, "CONTEXT", ts, colDashHd)
+    f_row(dash, 11, "Price in VA", priceInVA ? "YES ●" : "no", priceInVA ? colUp : color.gray, ts, colText)
+    f_row(dash, 12, "Price vs POC", priceVsPoc, close > nz(pocPrice) ? colUp : colDn, ts, colText)
+    f_row(dash, 13, "POC Dist (ATR)", na(pocDistAtr) ? "—" : str.tostring(pocDistAtr, "0.00"), colText, ts, colText)
+    f_row(dash, 14, "LVN Levels", str.tostring(lvnCount), colText, ts, colText)
+    f_row(dash, 15, "Range Pos", rangePosTxt, colText, ts, colText)
+    f_row(dash, 16, "ATR", f_fmt(atr), colUp, ts, colText)
+
+    f_hdr(dash, 17, "SESSION", ts, colDashHd)
+    f_row(dash, 18, "Prev Day H", f_fmt(pdh), colVA, ts, colText)
+    f_row(dash, 19, "Prev Day L", f_fmt(pdl), colVA, ts, colText)
+    f_row(dash, 20, "Session Pos", sessPos, sessCol, ts, colText)
+
+    f_hdr(dash, 21, "FAIR VALUE GAPS", ts, colDashHd)
+    f_row(dash, 22, "Active FVGs", str.tostring(fvgBull + fvgBear), colDashHd, ts, colText)
+    f_row(dash, 23, "Bull / Bear", "▲" + str.tostring(fvgBull) + "  ▼" + str.tostring(fvgBear), colText, ts, colText)
+    f_row(dash, 24, "Price in FVG", priceInFvg ? "YES ●" : "no", priceInFvg ? colUp : color.gray, ts, colText)
+
+    f_hdr(dash, 25, "META", ts, colDashHd)
+    table.merge_cells(dash, 0, 26, 1, 26)
+    table.cell(dash, 0, 26, "HTF/TF " + htfSession + "/" + htfLabel + "  ·  Bins " + str.tostring(numBins) + "  ·  VA " + str.tostring(vaPercent, "#") + "%  ·  LB " + str.tostring(lookback), text_color=color.new(colText, 35), text_size=size.tiny, text_halign=text.align_left)
+
+// ══════════════════════════════════════════════════════════════════════════
+//  MODULE 8 · ALERTS
+// ══════════════════════════════════════════════════════════════════════════
+crossPOC  = ta.cross(close, pocPrice)
+crossVAHu = ta.crossover(close, vahPrice)
+crossVALd = ta.crossunder(close, valPrice)
+alertcondition(not na(pocPrice) and crossPOC,  "Price crossed POC", "nico66fx VP PRO — price crossed POC")
+alertcondition(not na(vahPrice) and crossVAHu, "Break above VAH",   "nico66fx VP PRO — break above Value Area")
+alertcondition(not na(valPrice) and crossVALd, "Break below VAL",   "nico66fx VP PRO — break below Value Area")

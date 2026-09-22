@@ -1,0 +1,271 @@
+//@version=6
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  CFD LOT SIZE CALCULATOR — @nico66fx                                     ║
+// ║                                                                          ║
+// ║  Hace UNA sola cosa: calcular el lotaje a partir de Entry / SL,          ║
+// ║  el balance y el % de riesgo. Dibuja la caja de la operacion y pega el   ║
+// ║  lotaje a su derecha. Todo se recalcula al arrastrar los niveles.        ║
+// ║  Direccion Long/Short detectada automaticamente.                        ║
+// ║  Sin señales, sin indicadores tecnicos, sin backtesting.                 ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+// calc_bars_count = 10  ->  Pine solo ejecuta el script en las ultimas 10 velas.
+// El calculo no depende del historico, asi que recorrer 100.000 barras solo
+// servia para que cada arrastre de un nivel tardase segundos.
+indicator("CFD Lot Size Calculator — @nico66fx", "CFD Lot Size", overlay = true, max_lines_count = 4, max_labels_count = 4, max_boxes_count = 4, calc_bars_count = 10)
+
+// ═══════════════════════════════════════════════════════════════ INPUTS ═════
+G_ACC = "Account"
+G_TRD = "Trade"
+G_INS = "Instrument"
+G_UI  = "Display"
+
+balance = input.float(10000.0, "Account Balance", minval = 0.0, step = 100.0, group = G_ACC)
+riskPct = input.float(1.0, "Risk %", minval = 0.0, maxval = 100.0, step = 0.1, group = G_ACC)
+acctCcy = input.string("USD", "Account Currency",
+     options = ["USD", "EUR", "GBP", "CHF", "JPY", "AUD", "CAD", "NZD", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "TRY", "ZAR", "MXN", "BRL", "SGD", "HKD", "CNY", "INR"],
+     group = G_ACC,
+     tooltip = "Divisa de tu cuenta. Si coincide con la del instrumento (lo normal: casi todo cotiza en USD), no hay que tocar nada mas.")
+fxManual = input.float(0.0, "FX rate (0 = auto)", minval = 0.0, step = 0.00001, group = G_ACC,
+     tooltip = "SOLO si la divisa del instrumento no es la de tu cuenta.\nEjemplo: instrumento en USD y cuenta en EUR -> mete aqui el USDEUR (ej. 0.92).\nSe deja a mano a proposito: pedirle el cambio al servidor obligaba a TradingView a recalcular todo el script con cada movimiento de un nivel.")
+
+// Niveles interactivos: al añadir el indicador TradingView pide 3 clics
+// (Entry, SL, TP). Para la siguiente operacion NO hace falta reinstalarlo:
+// selecciona el indicador en el grafico y arrastra los tres handles.
+dirStr = input.string("Auto", "Direction", options = ["Auto", "Long", "Short"], group = G_TRD,
+     tooltip = "Auto: Long si el SL queda por DEBAJO del Entry, Short si queda por ENCIMA. Cambia solo al arrastrar el SL al otro lado.")
+pEntry = input.price(0.0, "Entry", group = G_TRD, confirm = true)
+pSL    = input.price(0.0, "Stop Loss", group = G_TRD, confirm = true)
+pTP    = input.price(0.0, "Take Profit", group = G_TRD, confirm = true,
+     tooltip = "Ponlo a 0 en los ajustes si no quieres TP (se ocultan TP y R:R).")
+
+contractSize = input.float(0.0, "Contract Size (0 = auto)", minval = 0.0, step = 1.0, group = G_INS,
+     tooltip = "Unidades que mueve 1 LOTE en TU broker.\n0 = AUTO segun el instrumento:\n  Forex -> 100000 (lote estandar)\n  XAU / oro -> 100\n  XAG / plata -> 5000\n  Indices CFD, futuros, cripto, acciones -> 1\nPonlo a mano si tu broker usa otro (petroleo suele ser 1000, cuentas mini/micro, etc.).")
+pvManual = input.float(0.0, "Point Value override (0 = auto)", minval = 0.0, step = 0.01, group = G_INS,
+     tooltip = "Valor de 1.0 de movimiento de PRECIO por UNIDAD/contrato, en la divisa del instrumento.\n0 = usa syminfo.pointvalue (1 en forex, oro e indices CFD; el multiplicador real en futuros).")
+lotStep = input.float(0.01, "Lot Step", minval = 0.000001, step = 0.01, group = G_INS,
+     tooltip = "El lotaje SIEMPRE se redondea HACIA ABAJO a este paso, para no superar nunca el riesgo configurado.")
+
+posStr    = input.string("Top Right", "Panel Position",
+     options = ["Top Right", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Left"], group = G_UI)
+showBox   = input.bool(true, "Draw position box", group = G_UI)
+boxBars   = input.int(25, "Box width (bars)", minval = 1, maxval = 200, group = G_UI)
+showLbl   = input.bool(true, "Show lots label next to box", group = G_UI)
+showStats = input.bool(true, "Show SL / TP / R:R in panel", group = G_UI)
+
+// ══════════════════════════════════════════════ CONSTANTES DEL SÍMBOLO ══════
+// Todo esto depende solo del simbolo y de los inputs: con `var` se evalua UNA
+// vez por ejecucion, no en cada vela del historico.
+var tkrUp  = str.upper(syminfo.ticker)
+// Contract size = dato del BROKER, no del simbolo. AUTO cubre lo estandar.
+// XAU/XAG se comprueban antes que "forex" porque algunos feeds los clasifican asi.
+var csAuto = str.contains(tkrUp, "XAU") ? 100.0 : str.contains(tkrUp, "XAG") ? 5000.0 : syminfo.type == "forex" ? 100000.0 : 1.0
+var csUsed = contractSize > 0 ? contractSize : csAuto
+// Valor de 1.0 de precio por UNIDAD/contrato: 1 en forex/oro/indices, multiplicador real en futuros.
+var pvUsed = pvManual > 0 ? pvManual : ((na(syminfo.pointvalue) or syminfo.pointvalue <= 0) ? 1.0 : syminfo.pointvalue)
+// Distancias en pips si es forex (mas legible que 0.00046).
+var usePips = syminfo.type == "forex"
+var mtDig   = int(math.round(-math.log10(syminfo.mintick)))
+var pipSize = usePips and (mtDig == 5 or mtDig == 3) ? syminfo.mintick * 10.0 : syminfo.mintick
+// Decimales de salida derivados del lot step (0.01 -> 2, 0.001 -> 3, 1 -> 0).
+var lotDig  = math.max(0, math.min(4, int(math.ceil(-math.log10(lotStep) - 1e-9))))
+var tPos    = posStr == "Top Left" ? position.top_left : posStr == "Middle Right" ? position.middle_right : posStr == "Middle Left" ? position.middle_left : posStr == "Bottom Right" ? position.bottom_right : posStr == "Bottom Left" ? position.bottom_left : position.top_right
+
+// Tipo de cambio SIN peticiones de datos: el script es 100% local y por eso
+// responde al instante. Si las divisas coinciden (caso normal) el factor es 1.
+var sameCcy   = syminfo.currency == acctCcy
+var fxRate    = sameCcy ? 1.0 : (fxManual > 0 ? fxManual : 1.0)
+var fxMissing = not sameCcy and fxManual <= 0
+
+// ════════════════════════════════════════════════════════════ FUNCIONES ═════
+fmtLot(v, d) =>
+    f = d == 0 ? "0" : d == 1 ? "0.0" : d == 2 ? "0.00" : d == 3 ? "0.000" : "0.0000"
+    str.tostring(v, f)
+
+fmtDist(d) =>
+    usePips ? str.tostring(d / pipSize, "0.0") + " pips" : str.tostring(d, format.mintick)
+
+// ═════════════════════════════════════════════════════════════ OBJETOS ══════
+var table t     = table.new(tPos, 2, 7, border_width = 0)
+var box   zTP   = na
+var box   zSL   = na
+var line  lEn   = na
+var label lLots = na
+
+cL(row, txt, col, sz) => table.cell(t, 0, row, txt, text_color = col, text_size = sz, text_halign = text.align_left)
+cR(row, txt, col, sz) => table.cell(t, 1, row, txt, text_color = col, text_size = sz, text_halign = text.align_right)
+
+mkBox(bx, xl, yTop, xr, yBot, bg, bc) =>
+    box z = bx
+    if na(z)
+        z := box.new(xl, yTop, xr, yBot, xloc = xloc.bar_index, border_color = bc, border_width = 1, bgcolor = bg)
+    box.set_lefttop(z, xl, yTop)
+    box.set_rightbottom(z, xr, yBot)
+    box.set_bgcolor(z, bg)
+    box.set_border_color(z, bc)
+    z
+
+mkLine(ln, yPrice, xl, xr, col) =>
+    line l = ln
+    if na(l)
+        l := line.new(xl, yPrice, xr, yPrice, xloc = xloc.bar_index, color = col, width = 1)
+    line.set_xy1(l, xl, yPrice)
+    line.set_xy2(l, xr, yPrice)
+    line.set_color(l, col)
+    l
+
+mkLots(lb, x, y, txt, bg, tc) =>
+    label l = lb
+    if na(l)
+        l := label.new(x, y, txt, xloc = xloc.bar_index, yloc = yloc.price, color = bg, style = label.style_label_left, textcolor = tc, size = size.normal)
+    label.set_xy(l, x, y)
+    label.set_text(l, txt)
+    label.set_color(l, bg)
+    label.set_textcolor(l, tc)
+    l
+
+// ══════════════════════════════════════════════════════════════════════════
+//  TODO el trabajo ocurre solo en la ultima vela: el calculo no depende del
+//  historico, asi que recorrer 20.000 baras construyendo textos no aporta nada.
+// ══════════════════════════════════════════════════════════════════════════
+if barstate.islast
+
+    // ─────────────────────────────────────────────────────────── CÁLCULO ───
+    hasEntry = pEntry > 0.0
+    hasSL    = pSL    > 0.0
+    hasTP    = pTP    > 0.0
+
+    // Direccion automatica: SL debajo del Entry = Long, SL encima = Short.
+    isLong = dirStr == "Auto" ? (hasEntry and hasSL ? pSL < pEntry : true) : dirStr == "Long"
+
+    slDist = hasEntry and hasSL ? math.abs(pEntry - pSL) : 0.0
+    tpDist = hasEntry and hasTP ? math.abs(pTP - pEntry) : 0.0
+    sideOk = hasEntry and hasSL and (isLong ? pSL < pEntry : pSL > pEntry)
+    tpOk   = hasEntry and hasTP and (isLong ? pTP > pEntry : pTP < pEntry)
+
+    // Dinero (en divisa de cuenta) que mueve 1.0 de PRECIO con 1 LOTE.
+    //   Forex:  100000 * 1 = 100$ por 1.0 -> SL de 0.00046 = 46$   por lote
+    //   Gold:      100 * 1 = 100$ por 1.0 -> SL de 10.5    = 1050$ por lote
+    //   NAS100:      1 * 1 =   1$ por 1.0 -> SL de 50 pts  = 50$   por lote
+    valuePerPoint = csUsed * pvUsed * fxRate
+    riskAmount    = balance * riskPct / 100.0
+    lossPerLot    = slDist * valuePerPoint
+    rawLots       = lossPerLot > 0 ? riskAmount / lossPerLot : 0.0
+
+    // ─── Validacion: mensajes cortos, nunca numeros absurdos ───
+    string errMain = na
+    string errSub  = na
+    if not (hasEntry and hasSL)
+        errMain := "SET LEVELS"
+        errSub  := "Click Entry and Stop Loss on the chart"
+    else if slDist < syminfo.mintick
+        errMain := "INVALID ENTRY / SL"
+        errSub  := "Entry and SL are at the same price"
+    else if not sideOk
+        errMain := "INVALID SL"
+        errSub  := isLong ? "Long: SL must be BELOW Entry" : "Short: SL must be ABOVE Entry"
+    else if fxMissing
+        errMain := "SET FX RATE"
+        errSub  := "Enter the " + syminfo.currency + " to " + acctCcy + " rate in settings"
+    else if riskAmount <= 0
+        errMain := "NO RISK SET"
+        errSub  := "Balance and Risk % must be > 0"
+    else if valuePerPoint <= 0
+        errMain := "INVALID INSTRUMENT"
+        errSub  := "Contract size / point value must be > 0"
+    else if rawLots > 1e9
+        errMain := "SL TOO CLOSE"
+        errSub  := "Resulting size is unrealistic"
+
+    valid = na(errMain)
+
+    // Redondeo SIEMPRE hacia abajo al lot step (nunca supera el riesgo).
+    // El 1e-9 compensa el error binario (0.29/0.01 = 28.999... -> 28).
+    lots     = valid ? math.floor(rawLots / lotStep + 1e-9) * lotStep : 0.0
+    riskUsed = lots * lossPerLot
+    riskPctU = balance > 0 ? riskUsed / balance * 100.0 : 0.0
+    rr       = tpOk and slDist > 0 ? tpDist / slDist : na
+    // Un retail no opera 1000 lotes: casi siempre es el Contract Size mal puesto.
+    sizeWarn = valid and lots >= 1000
+
+    // ──────────────────────────────────────────────────────────── ESTILO ───
+    // Tema automatico segun el fondo del grafico (sin input extra).
+    isLight = 0.299 * color.r(chart.bg_color) + 0.587 * color.g(chart.bg_color) + 0.114 * color.b(chart.bg_color) > 140
+    cPanel  = isLight ? color.new(#FFFFFF, 4)  : color.new(#0E131C, 6)
+    cFrame  = isLight ? color.new(#000000, 88) : color.new(#FFFFFF, 88)
+    cText   = isLight ? #10141C : #E8ECF4
+    cDim    = isLight ? #7C828E : #6F7787
+    cSoft   = isLight ? #A8AEB8 : #565D6B
+    cRed    = isLight ? #D0394A : #E4515F
+    cGrn    = isLight ? #0E8E77 : #17B394
+    cLvlE   = isLight ? #55606E : #8A94A6
+    cPill   = isLight ? #EEF1F5 : #1B2230
+
+    // ───────────────────────────────────────────────────────────── PANEL ───
+    table.set_bgcolor(t, cPanel)
+    table.set_frame_color(t, cFrame)
+    table.set_frame_width(t, 1)
+    table.clear(t, 0, 0, 1, 6)
+
+    cL(0, "CFD LOT SIZE" + (sizeWarn ? " · CHECK CONTRACT SIZE" : ""), sizeWarn ? cRed : cDim, size.tiny)
+    cR(6, "@nico66fx", cSoft, size.tiny)
+
+    if valid
+        cR(0, isLong ? "LONG" : "SHORT", isLong ? cGrn : cRed, size.tiny)
+
+        tip = "Target risk: " + str.tostring(riskAmount, "0.00") + " " + acctCcy
+        tip := tip + "\nLoss per 1 lot at SL: " + str.tostring(lossPerLot, "0.00") + " " + acctCcy
+        tip := tip + "\nValue of 1.0 price move per lot: " + str.tostring(valuePerPoint, "0.00") + " " + acctCcy
+        tip := tip + "\nContract size: " + str.tostring(csUsed) + (contractSize > 0 ? " (manual)" : " (auto, " + syminfo.type + ")")
+        tip := tip + "\nPoint value: " + str.tostring(pvUsed) + "   mintick: " + str.tostring(syminfo.mintick)
+        tip := tip + "\nFX " + syminfo.currency + "/" + acctCcy + ": " + str.tostring(fxRate, "0.00000") + (sameCcy ? " (same currency)" : " (manual)")
+        tip := tip + "\nExact size: " + str.tostring(rawLots, "0.0000") + " lots, rounded DOWN to step " + str.tostring(lotStep)
+        table.cell(t, 0, 1, fmtLot(lots, lotDig), text_color = sizeWarn ? cRed : cText, text_size = size.large, text_halign = text.align_left, tooltip = tip)
+        cR(1, "LOTS", cDim, size.small)
+
+        cL(2, "Risk", cDim, size.small)
+        if lots > 0
+            cR(2, str.tostring(riskUsed, "0.00") + " " + acctCcy + "  ·  " + str.tostring(riskPctU, "0.00") + "%", cText, size.small)
+        else
+            cR(2, "below lot step", cRed, size.small)
+
+        if showStats
+            cL(3, "SL", cDim, size.small)
+            cR(3, fmtDist(slDist), cRed, size.small)
+            if tpOk
+                cL(4, "TP", cDim, size.small)
+                cR(4, fmtDist(tpDist), cGrn, size.small)
+                cL(5, "R:R", cDim, size.small)
+                cR(5, "1 : " + str.tostring(rr, "0.00"), cText, size.small)
+    else
+        cL(1, errMain, cRed, size.normal)
+        cL(2, errSub, cDim, size.tiny)
+
+    // ──────────────────────────────────────────── CAJA DE POSICIÓN ─────────
+    // La dibuja el indicador: Pine no puede leer las herramientas de dibujo
+    // de TradingView. Se mueve arrastrando los handles de Entry / SL / TP.
+    xl = bar_index
+    xr = bar_index + boxBars
+
+    if showBox and tpOk
+        zTP := mkBox(zTP, xl, math.max(pEntry, pTP), xr, math.min(pEntry, pTP), isLight ? color.new(#0E8E77, 90) : color.new(#17B394, 88), color.new(cGrn, 72))
+    else
+        box.delete(zTP)
+        zTP := na
+
+    if showBox and sideOk
+        zSL := mkBox(zSL, xl, math.max(pEntry, pSL), xr, math.min(pEntry, pSL), isLight ? color.new(#D0394A, 91) : color.new(#E4515F, 90), color.new(cRed, 72))
+    else
+        box.delete(zSL)
+        zSL := na
+
+    if showBox and hasEntry
+        lEn := mkLine(lEn, pEntry, xl, xr, cLvlE)
+    else
+        line.delete(lEn)
+        lEn := na
+
+    if showLbl and hasEntry
+        lLots := mkLots(lLots, xr, pEntry, valid ? fmtLot(lots, lotDig) + " lots" : errMain, cPill, valid ? (sizeWarn ? cRed : cText) : cRed)
+    else
+        label.delete(lLots)
+        lLots := na

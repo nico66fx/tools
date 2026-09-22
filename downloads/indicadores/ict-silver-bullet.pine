@@ -1,0 +1,718 @@
+//@version=5
+// =============================================================================
+//  ICT Silver Bullet by @nico66fx
+// -----------------------------------------------------------------------------
+//  Deterministic, backtestable, non-repainting implementation of the ICT
+//  Silver Bullet model:
+//
+//      TIME WINDOW -> LIQUIDITY SWEEP -> (MSS) -> DISPLACEMENT -> FVG
+//      -> FVG RETEST -> ENTRY -> SL / TP
+//
+//  CORE RULE: a setup can ONLY exist inside a valid Silver Bullet window.
+//  Everything (sweep, MSS, FVG creation and FVG retest/entry) must happen
+//  between the window open and the window close. When the window closes, any
+//  untested FVG is invalidated and can never produce an entry afterwards.
+//
+//  NO-REPAINT DESIGN NOTES
+//  -----------------------
+//  * The whole engine runs inside `if barstate.isconfirmed`, so state is only
+//    committed on closed bars. Historical and realtime behaviour are identical.
+//  * No `lookahead_on`, no `request.security`, no future bar access.
+//  * Pivots come from ta.pivothigh/ta.pivotlow, which are only known after
+//    `right` bars have closed. The pivot PRICE is therefore already confirmed
+//    when the script uses it - the drawing simply refers to an older bar.
+//  * The 3-candle FVG is detected on the close of its third candle, so all
+//    three candles are closed when the gap is registered.
+//  * SL/TP resolution starts on the bar AFTER the entry bar (see AMBIGUITY).
+//
+//  AMBIGUITY CONVENTIONS (documented decisions)
+//  --------------------------------------------
+//  1. If SL and TP are both touched inside the same bar -> SL is assumed to be
+//     filled first (conservative).
+//  2. The trade is evaluated from the bar following the entry bar. The entry
+//     bar itself is not used for SL/TP because the manipulation extreme (and
+//     therefore the SL) is allowed to update with that same bar, which would
+//     otherwise produce artificial instant stop-outs.
+//  3. If a bullish and a bearish sweep happen on the same bar (outside bar),
+//     the direction of the candle body decides (close > open -> bullish).
+//  4. Entry fill price = the trigger level, unless the bar opened beyond it
+//     (gap through), in which case the open is used.
+// =============================================================================
+
+indicator("ICT Silver Bullet by @nico66fx", "ICT SB", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ============================================================== INPUTS ======
+gSess  = "SESSION"
+enLondon = input.bool(true,  "Enable London Window   (03:00-04:00 NY)", group = gSess)
+enNYAM   = input.bool(true,  "Enable NY AM Window    (10:00-11:00 NY)", group = gSess)
+enNYPM   = input.bool(true,  "Enable NY PM Window    (14:00-15:00 NY)", group = gSess)
+tzStr    = input.string("America/New_York", "Timezone", group = gSess, tooltip = "Explicit IANA timezone. America/New_York handles daylight saving time automatically. Do NOT use the exchange timezone.")
+showWin  = input.bool(true,  "Show Session Windows", group = gSess)
+
+gStruct = "STRUCTURE"
+pvtL  = input.int(5, "Pivot Left Bars",      minval = 1, group = gStruct)
+pvtR  = input.int(5, "Pivot Right Bars",     minval = 1, group = gStruct)
+enMSS = input.bool(true, "Enable MSS Filter", group = gStruct)
+mssL  = input.int(3, "MSS Pivot Left Bars",  minval = 1, group = gStruct)
+mssR  = input.int(3, "MSS Pivot Right Bars", minval = 1, group = gStruct)
+
+gFvg = "FVG"
+fvgMode    = input.string("Touch", "FVG Entry Mode", options = ["Touch", "50% of FVG", "Full Fill"], group = gFvg)
+useDisp    = input.bool(true, "Use Displacement Filter", group = gFvg)
+dispLen    = input.int(14, "Displacement ATR Period", minval = 1, group = gFvg)
+dispMult   = input.float(0.5, "Minimum Displacement ATR Multiplier", minval = 0.0, step = 0.1, group = gFvg)
+rmUntested = input.bool(true, "Remove Untested FVGs", group = gFvg)
+
+gTrend = "TREND"
+useTrend = input.bool(false, "Use Macro Trend Filter", group = gTrend)
+emaLen   = input.int(200, "Macro EMA Period", minval = 1, group = gTrend)
+
+gRisk = "RISK"
+slMode    = input.string("Manipulation Swing", "Stop Loss Method", options = ["Manipulation Swing", "FVG Opposite Edge", "ATR"], group = gRisk)
+slBufMult = input.float(0.0, "SL Buffer ATR Multiplier", minval = 0.0, step = 0.05, group = gRisk)
+slAtrMult = input.float(1.5, "SL ATR Multiplier (ATR method only)", minval = 0.1, step = 0.1, group = gRisk)
+tpMode    = input.string("Fixed R:R", "Take Profit Method", options = ["Fixed R:R", "Opposing Liquidity", "Session S/R"], group = gRisk)
+rrIn      = input.float(2.0, "Risk Reward", minval = 0.1, step = 0.1, group = gRisk)
+
+gTrade = "TRADE MANAGEMENT"
+maxTrades = input.int(1, "Maximum Trades Per Window", minval = 1, group = gTrade)
+enLongs   = input.bool(true, "Enable Longs",  group = gTrade)
+enShorts  = input.bool(true, "Enable Shorts", group = gTrade)
+
+gVis = "VISUAL"
+showFvg   = input.bool(true,  "Show FVG",                    group = gVis)
+showSwp   = input.bool(true,  "Show Liquidity Sweeps",       group = gVis)
+showMss   = input.bool(true,  "Show MSS",                    group = gVis)
+showRR    = input.bool(true,  "Show Risk/Reward Boxes",      group = gVis)
+showSR    = input.bool(true,  "Show Post-Session Levels",    group = gVis)
+keepSR    = input.bool(false, "Keep Historical Levels",      group = gVis)
+showStats = input.bool(true,  "Show Statistics Panel",       group = gVis)
+statsPos  = input.string("Top Right", "Statistics Panel Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = gVis)
+statsLook = input.int(15, "Statistics Lookback Trades", minval = 1, group = gVis)
+keepBoxes = input.bool(true, "Keep Historical Trade Boxes", group = gVis)
+
+gDbg = "DEBUG"
+debugMode = input.bool(false, "Debug Mode", group = gDbg)
+
+// ============================================================== PALETTE =====
+color C_BULL   = #26a69a
+color C_BEAR   = #ef5350
+color C_TP     = #26a69a
+color C_SL     = #ef5350
+color C_TXT    = #d1d4dc
+color C_DIM    = #787b86
+color C_PANEL  = #131722
+
+// ============================================================ CONSTANTS =====
+int ST_IDLE  = 0    // no window / nothing armed
+int ST_WIN   = 1    // WINDOW_ACTIVE
+int ST_LIQ   = 2    // LIQUIDITY_EVENT (sweep done)
+int ST_MSS   = 3    // MSS_CONFIRMED (or DISPLACEMENT stage when MSS filter off)
+int ST_FVG   = 4    // FVG_CREATED / WAITING_FOR_RETEST
+int ST_TRADE = 5    // ENTRY_TRIGGERED / TRADE_ACTIVE
+int ST_DONE  = 6    // COMPLETED (window exhausted)
+
+// ================================================================ TYPES =====
+type Fvg
+    int   dir      // 1 = bullish, -1 = bearish
+    int   bidx     // bar_index at creation
+    float top      // upper boundary of the gap
+    float bot      // lower boundary of the gap
+    float gsize    // top - bot
+    int   win      // Silver Bullet window id it was created in
+    float disp     // displacement body size that produced it
+    bool  used     // already consumed by an entry (or invalidated)
+    box   bx
+
+type SRLevel
+    line  ln
+    label lb
+    float px
+    int   bidx
+    bool  isHigh
+
+// ============================================================= FUNCTIONS ====
+f_winName(int w) => w == 1 ? "LONDON" : w == 2 ? "NY AM" : w == 3 ? "NY PM" : "-"
+
+f_stateName(int s) =>
+    s == ST_IDLE  ? "IDLE" :
+     s == ST_WIN   ? "WINDOW_ACTIVE" :
+     s == ST_LIQ   ? "LIQUIDITY_EVENT" :
+     s == ST_MSS   ? (enMSS ? "MSS_CONFIRMED" : "DISPLACEMENT") :
+     s == ST_FVG   ? "WAITING_FOR_RETEST" :
+     s == ST_TRADE ? "TRADE_ACTIVE" : "COMPLETED"
+
+// Entry trigger level for a gap, according to FVG Entry Mode.
+f_level(int dir, float top, float bot) =>
+    float mid = (top + bot) / 2.0
+    fvgMode == "Touch"       ? (dir == 1 ? top : bot) :
+     fvgMode == "50% of FVG" ? mid :
+                               (dir == 1 ? bot : top)
+
+f_rTxt(float x)  => (x >= 0 ? "+" : "") + str.tostring(x, "#.##") + "R"
+f_rTxt1(float x) => (x >= 0 ? "+" : "") + str.tostring(x, "0.0") + "R"
+f_rTxt2(float x) => (x >= 0 ? "+" : "") + str.tostring(x, "0.00") + "R"
+f_px(float x)    => str.tostring(x, format.mintick)
+
+// ================================================================ STATE =====
+var array<Fvg>     fvgs  = array.new<Fvg>()
+var array<SRLevel> srs   = array.new<SRLevel>()
+var array<float>   rHist = array.new_float()
+
+var int   state     = ST_IDLE
+var int   bias      = 0          // 1 = long context, -1 = short context
+var int   curWin    = 0
+var float mssRef    = na         // structural level whose break confirms MSS
+var float manip     = na         // running manipulation extreme since the sweep
+var int   tradesWin = 0
+var float winHi     = na
+var float winLo     = na
+
+var float lastPH  = na
+var float lastPL  = na
+var bool  phSwept = false
+var bool  plSwept = false
+var float lastMPH = na
+var float lastMPL = na
+
+var bool  tActive  = false
+var int   tDir     = 0
+var float tEntry   = na
+var float tSL      = na
+var float tTP      = na
+var float tTgtR    = na
+var int   tWin     = 0
+var int   tBar     = na
+var box   slBox    = na
+var box   tpBox    = na
+var label slLbl    = na
+var label tpLbl    = na
+var label entLbl   = na
+
+// funnel counters (diagnostics: how far the chain gets on this chart)
+var int cntWin   = 0
+var int cntSweep = 0
+var int cntMSS   = 0
+var int cntFvg   = 0
+var int cntEntry = 0
+var int sweepBar = na
+
+// debug mirrors
+var float dbgFTop = na
+var float dbgFBot = na
+var float dbgFSz  = na
+var float dbgDisp = na
+var int   dbgSwp  = 0
+
+// ============================================================ INDICATORS ====
+float atrV  = ta.atr(dispLen)
+float emaV  = ta.ema(close, emaLen)
+float ph    = ta.pivothigh(high, pvtL, pvtR)
+float pl    = ta.pivotlow(low,  pvtL, pvtR)
+float mph   = ta.pivothigh(high, mssL, mssR)
+float mpl   = ta.pivotlow(low,  mssL, mssR)
+int   mssN  = mssL + mssR + 1
+float hiN   = ta.highest(high, mssN)
+float loN   = ta.lowest(low,  mssN)
+
+// ============================================================== WINDOWS =====
+// A Silver Bullet window is 60 minutes. The full chain (sweep -> MSS -> displacement
+// -> FVG -> retest) must fit inside it, so the chart timeframe decides how many
+// candles the model has to work with. 1m = 60 candles, 5m = 12, 15m = 4 (unusable).
+int   tfSec      = timeframe.in_seconds(timeframe.period)
+float barsPerWin = tfSec > 0 ? 3600.0 / tfSec : 0.0
+
+// Explicit America/New_York clock -> DST is handled by TradingView.
+int nyH = hour(time, tzStr)
+
+int winId = 0
+if enLondon and nyH == 3
+    winId := 1
+else if enNYAM and nyH == 10
+    winId := 2
+else if enNYPM and nyH == 14
+    winId := 3
+
+bool winActive = winId != 0
+bool winStart  = winActive and nz(winId[1]) != winId
+bool winEnd    = not winActive and nz(winId[1]) != 0
+
+// ============================================================== EVENTS ======
+bool evWinStart = false
+bool evSweep    = false
+bool evSwpBull  = false
+bool evSwpBear  = false
+bool evMSS      = false
+bool evFvg      = false
+bool evEntry    = false
+bool evTP       = false
+bool evSL       = false
+
+// ========================================================== MAIN ENGINE =====
+// Everything below only mutates state on CLOSED bars -> no repaint.
+if barstate.isconfirmed
+
+    // ---------------------------------------------------- 1. PIVOTS --------
+    if not na(ph)
+        lastPH  := ph
+        phSwept := false
+    if not na(pl)
+        lastPL  := pl
+        plSwept := false
+    if not na(mph)
+        lastMPH := mph
+    if not na(mpl)
+        lastMPL := mpl
+
+    // ------------------------------------------- 2. ACTIVE TRADE MGMT ------
+    // Evaluated from the bar AFTER entry. SL is assumed filled first when both
+    // SL and TP are touched inside the same bar (conservative convention).
+    if tActive and bar_index > tBar
+        bool hitSL = tDir == 1 ? low  <= tSL : high >= tSL
+        bool hitTP = tDir == 1 ? high >= tTP : low  <= tTP
+        if hitSL or hitTP
+            float res = hitSL ? -1.0 : tTgtR
+            array.push(rHist, res)
+            tActive := false
+            if not na(slBox)
+                box.set_right(slBox, bar_index)
+            if not na(tpBox)
+                box.set_right(tpBox, bar_index)
+            if not na(slLbl)
+                label.set_x(slLbl, bar_index)
+            if not na(tpLbl)
+                label.set_x(tpLbl, bar_index)
+            if hitSL
+                evSL := true
+                alert("ICT Silver Bullet | SL HIT | " + (tDir == 1 ? "LONG" : "SHORT") + " | Window: " + f_winName(tWin) + " | Result: -1R", alert.freq_once_per_bar_close)
+            else
+                evTP := true
+                alert("ICT Silver Bullet | TP HIT | " + (tDir == 1 ? "LONG" : "SHORT") + " | Window: " + f_winName(tWin) + " | Result: " + f_rTxt(tTgtR), alert.freq_once_per_bar_close)
+            // release the state machine
+            state := winActive and tradesWin < maxTrades ? ST_WIN : (winActive ? ST_DONE : ST_IDLE)
+            bias  := 0
+            mssRef := na
+            manip  := na
+        else
+            if not na(slBox)
+                box.set_right(slBox, bar_index + 1)
+            if not na(tpBox)
+                box.set_right(tpBox, bar_index + 1)
+            if not na(slLbl)
+                label.set_x(slLbl, bar_index + 1)
+            if not na(tpLbl)
+                label.set_x(tpLbl, bar_index + 1)
+
+    // ------------------------------------------- 3. WINDOW TRANSITIONS -----
+    if winStart
+        state     := ST_WIN
+        bias      := 0
+        mssRef    := na
+        manip     := na
+        tradesWin := 0
+        curWin    := winId
+        winHi     := high
+        winLo     := low
+        dbgSwp    := 0
+        cntWin    += 1
+        evWinStart := true
+        alert("ICT Silver Bullet | WINDOW STARTED | " + f_winName(winId), alert.freq_once_per_bar_close)
+    else if winActive
+        winHi := math.max(nz(winHi, high), high)
+        winLo := math.min(nz(winLo, low),  low)
+
+    if winEnd
+        // Every FVG born in this window dies with the window. It can never be
+        // used for an entry afterwards.
+        int n = array.size(fvgs)
+        if n > 0
+            for i = n - 1 to 0
+                Fvg f = array.get(fvgs, i)
+                if not f.used and not na(f.bx)
+                    if rmUntested
+                        box.delete(f.bx)
+                    else
+                        box.set_bgcolor(f.bx, color.new(C_DIM, 92))
+                        box.set_border_color(f.bx, color.new(C_DIM, 70))
+                array.remove(fvgs, i)
+        // Post-session support / resistance from the window range.
+        if showSR and not na(winHi) and not na(winLo)
+            if not keepSR
+                int m = array.size(srs)
+                if m > 0
+                    for i = m - 1 to 0
+                        SRLevel s = array.get(srs, i)
+                        line.delete(s.ln)
+                        label.delete(s.lb)
+                        array.remove(srs, i)
+            string wn = f_winName(nz(winId[1]))
+            line lnH = line.new(bar_index, winHi, bar_index + 1, winHi, extend = extend.right, color = color.new(C_BEAR, 45), style = line.style_dotted, width = 1)
+            label lbH = label.new(bar_index, winHi, wn + " HIGH", style = label.style_none, textcolor = color.new(C_BEAR, 25), size = size.tiny, textalign = text.align_left)
+            array.push(srs, SRLevel.new(lnH, lbH, winHi, bar_index, true))
+            line lnL = line.new(bar_index, winLo, bar_index + 1, winLo, extend = extend.right, color = color.new(C_BULL, 45), style = line.style_dotted, width = 1)
+            label lbL = label.new(bar_index, winLo, wn + " LOW", style = label.style_none, textcolor = color.new(C_BULL, 25), size = size.tiny, textalign = text.align_left)
+            array.push(srs, SRLevel.new(lnL, lbL, winLo, bar_index, false))
+            // hard cap so the chart never accumulates hundreds of objects
+            while array.size(srs) > 20
+                SRLevel s0 = array.shift(srs)
+                line.delete(s0.ln)
+                label.delete(s0.lb)
+        curWin := 0
+        bias   := 0
+        mssRef := na
+        manip  := na
+        if not tActive
+            state := ST_IDLE
+
+    // --------------------------------------- 4. POST-SESSION LEVEL HITS ----
+    int ns = array.size(srs)
+    if ns > 0
+        for i = ns - 1 to 0
+            SRLevel s = array.get(srs, i)
+            if bar_index > s.bidx and low <= s.px and high >= s.px
+                line.delete(s.ln)
+                label.delete(s.lb)
+                array.remove(srs, i)
+
+    // ------------------------------------------------ 5. LIQUIDITY SWEEP ---
+    // Bullish: sell-side liquidity taken and reclaimed. Bearish: mirror.
+    bool bullSweep = winActive and not na(lastPL) and not plSwept and low  < lastPL and close > lastPL
+    bool bearSweep = winActive and not na(lastPH) and not phSwept and high > lastPH and close < lastPH
+    if bullSweep
+        plSwept := true
+    if bearSweep
+        phSwept := true
+
+    bool canArm = winActive and state != ST_IDLE and state != ST_DONE and not tActive and tradesWin < maxTrades
+
+    int newSweep = 0
+    if canArm
+        if bullSweep and bearSweep
+            newSweep := close > open ? 1 : -1      // outside bar convention
+        else if bullSweep
+            newSweep := 1
+        else if bearSweep
+            newSweep := -1
+    // direction switches are respected by the user's Long/Short toggles
+    if newSweep == 1 and not enLongs
+        newSweep := 0
+    if newSweep == -1 and not enShorts
+        newSweep := 0
+
+    if newSweep != 0 and (newSweep != bias or state <= ST_MSS)
+        // A new sweep re-arms the context: pending (unentered) FVGs of this
+        // window are discarded so only one live setup exists at a time.
+        int nf = array.size(fvgs)
+        if nf > 0
+            for i = nf - 1 to 0
+                Fvg f = array.get(fvgs, i)
+                if not f.used
+                    if not na(f.bx)
+                        box.delete(f.bx)
+                    array.remove(fvgs, i)
+        bias   := newSweep
+        state  := ST_LIQ
+        manip  := newSweep == 1 ? low : high
+        dbgSwp := newSweep
+        // MSS reference: latest confirmed MSS pivot in the opposite side of the
+        // sweep. If it is already broken at sweep time it would be meaningless,
+        // so we fall back to the local structural extreme.
+        // Use the NEAREST structural level still above (bullish) / below (bearish)
+        // price. A distant pivot is unreachable inside a 60-minute window.
+        if newSweep == 1
+            mssRef := not na(lastMPH) and lastMPH > close and lastMPH < hiN ? lastMPH : hiN
+        else
+            mssRef := not na(lastMPL) and lastMPL < close and lastMPL > loN ? lastMPL : loN
+        sweepBar  := bar_index
+        cntSweep  += 1
+        evSwpBull := newSweep == 1
+        evSwpBear := newSweep == -1
+        evSweep := true
+        alert("ICT Silver Bullet | LIQUIDITY SWEEP " + (newSweep == 1 ? "BULLISH" : "BEARISH") + " | Window: " + f_winName(curWin), alert.freq_once_per_bar_close)
+
+    // running manipulation extreme (feeds the Manipulation Swing stop)
+    if bias != 0 and state >= ST_LIQ and state <= ST_FVG
+        manip := bias == 1 ? math.min(nz(manip, low), low) : math.max(nz(manip, high), high)
+
+    // -------------------------------------------------- 6. MSS / SHIFT -----
+    if enMSS and state == ST_LIQ and winActive and not na(mssRef)
+        if (bias == 1 and close > mssRef) or (bias == -1 and close < mssRef)
+            state  := ST_MSS
+            cntMSS += 1
+            if showMss and not na(sweepBar)
+                line.new(sweepBar, mssRef, bar_index, mssRef, color = color.new(bias == 1 ? C_BULL : C_BEAR, 25), style = line.style_dashed, width = 1)
+                label.new(bar_index, mssRef, "MSS", style = bias == 1 ? label.style_label_down : label.style_label_up, color = color.new(bias == 1 ? C_BULL : C_BEAR, 25), textcolor = color.white, size = size.tiny)
+            evMSS  := true
+            alert("ICT Silver Bullet | MSS CONFIRMED " + (bias == 1 ? "BULLISH" : "BEARISH") + " | Level: " + f_px(mssRef) + " | Window: " + f_winName(curWin), alert.freq_once_per_bar_close)
+
+    // ------------------------------------- 7. DISPLACEMENT + FVG CREATION --
+    // Classic 3-candle gap, confirmed on the close of the third candle.
+    bool bullGap = low  > high[2]
+    bool bearGap = high < low[2]
+    float dispBody = math.abs(close[1] - open[1])
+    bool dispOK = not useDisp or (not na(atrV[1]) and dispBody >= atrV[1] * dispMult)
+    bool trendOK = not useTrend or (bias == 1 ? close > emaV : bias == -1 ? close < emaV : false)
+
+    int stageOK = enMSS ? ST_MSS : ST_LIQ
+    bool canFvg = winActive and bias != 0 and not tActive and tradesWin < maxTrades and (state == stageOK or state == ST_FVG) and dispOK and trendOK
+
+    if canFvg and ((bias == 1 and bullGap) or (bias == -1 and bearGap))
+        float gTop = bias == 1 ? low     : low[2]
+        float gBot = bias == 1 ? high[2] : high
+        float gSz  = gTop - gBot
+        if gSz > 0
+            box bx = na
+            if showFvg
+                bx := box.new(bar_index - 2, gTop, bar_index + 1, gBot, border_color = color.new(bias == 1 ? C_BULL : C_BEAR, 55), border_width = 1, bgcolor = color.new(bias == 1 ? C_BULL : C_BEAR, 88))
+            array.push(fvgs, Fvg.new(bias, bar_index, gTop, gBot, gSz, curWin, dispBody, false, bx))
+            state   := ST_FVG
+            dbgFTop := gTop
+            dbgFBot := gBot
+            dbgFSz  := gSz
+            dbgDisp := dispBody
+            cntFvg  += 1
+            evFvg   := true
+            alert("ICT Silver Bullet | FVG CREATED " + (bias == 1 ? "BULLISH" : "BEARISH") + " | " + f_px(gBot) + " - " + f_px(gTop) + " | Window: " + f_winName(curWin), alert.freq_once_per_bar_close)
+
+    // keep pending gaps stretched to the right edge
+    int nfe = array.size(fvgs)
+    if nfe > 0
+        for i = 0 to nfe - 1
+            Fvg f = array.get(fvgs, i)
+            if not f.used and not na(f.bx)
+                box.set_right(f.bx, bar_index + 1)
+
+    // ------------------------------------------- 8. FVG RETEST -> ENTRY ----
+    // Entries are only possible INSIDE the window. First valid retest of a gap
+    // is the entry; that gap is then consumed for good (first touch only).
+    if winActive and not tActive and tradesWin < maxTrades and state == ST_FVG
+        Fvg  hitF  = na
+        float hitLv = na
+        int nh = array.size(fvgs)
+        if nh > 0
+            for i = 0 to nh - 1
+                Fvg f = array.get(fvgs, i)
+                if not f.used and f.win == curWin and f.dir == bias and bar_index > f.bidx
+                    float lv = f_level(f.dir, f.top, f.bot)
+                    bool trig = f.dir == 1 ? low <= lv : high >= lv
+                    if trig
+                        hitF  := f
+                        hitLv := lv
+                        break
+
+        if not na(hitF)
+            hitF.used := true                       // consumed either way
+            if not na(hitF.bx)
+                box.set_bgcolor(hitF.bx, color.new(hitF.dir == 1 ? C_BULL : C_BEAR, 94))
+                box.set_border_color(hitF.bx, color.new(C_DIM, 60))
+                box.set_right(hitF.bx, bar_index)
+
+            int   dir = hitF.dir
+            float ent = dir == 1 ? math.min(hitLv, open) : math.max(hitLv, open)
+            float buf = nz(atrV) * slBufMult
+            float raw = slMode == "FVG Opposite Edge" ? (dir == 1 ? hitF.bot : hitF.top) :
+                         slMode == "ATR"              ? (dir == 1 ? ent - nz(atrV) * slAtrMult : ent + nz(atrV) * slAtrMult) :
+                                                         (na(manip) ? (dir == 1 ? hitF.bot : hitF.top) : manip)
+            float sl  = dir == 1 ? raw - buf : raw + buf
+            float rsk = dir == 1 ? ent - sl : sl - ent
+
+            if rsk >= syminfo.mintick
+                float fixTp = dir == 1 ? ent + rrIn * rsk : ent - rrIn * rsk
+                float tp = fixTp
+                if tpMode == "Opposing Liquidity"
+                    float opp = dir == 1 ? lastPH : lastPL
+                    tp := not na(opp) and (dir == 1 ? opp > ent + rsk * 0.1 : opp < ent - rsk * 0.1) ? opp : fixTp
+                else if tpMode == "Session S/R"
+                    float lvl = dir == 1 ? winHi : winLo
+                    tp := not na(lvl) and (dir == 1 ? lvl > ent + rsk * 0.1 : lvl < ent - rsk * 0.1) ? lvl : fixTp
+
+                float tgtR = math.abs(tp - ent) / rsk
+
+                if not keepBoxes
+                    if not na(slBox)
+                        box.delete(slBox)
+                    if not na(tpBox)
+                        box.delete(tpBox)
+                    if not na(slLbl)
+                        label.delete(slLbl)
+                    if not na(tpLbl)
+                        label.delete(tpLbl)
+                    if not na(entLbl)
+                        label.delete(entLbl)
+
+                tActive := true
+                tDir    := dir
+                tEntry  := ent
+                tSL     := sl
+                tTP     := tp
+                tTgtR   := tgtR
+                tWin    := curWin
+                tBar    := bar_index
+                tradesWin += 1
+                state := ST_TRADE
+
+                if showRR
+                    slBox := box.new(bar_index, math.max(ent, sl), bar_index + 1, math.min(ent, sl), border_color = color.new(C_SL, 40), border_width = 1, bgcolor = color.new(C_SL, 82))
+                    tpBox := box.new(bar_index, math.max(ent, tp), bar_index + 1, math.min(ent, tp), border_color = color.new(C_TP, 40), border_width = 1, bgcolor = color.new(C_TP, 82))
+                    slLbl := label.new(bar_index + 1, sl, "SL -1R", style = label.style_label_left, color = color.new(C_SL, 25), textcolor = color.white, size = size.tiny)
+                    tpLbl := label.new(bar_index + 1, tp, "TP " + f_rTxt(tgtR), style = label.style_label_left, color = color.new(C_TP, 25), textcolor = color.white, size = size.tiny)
+                    entLbl := label.new(bar_index, ent, (dir == 1 ? "▲ " : "▼ ") + (dir == 1 ? "LONG" : "SHORT") + " " + f_winName(curWin), style = dir == 1 ? label.style_label_up : label.style_label_down, color = color.new(dir == 1 ? C_BULL : C_BEAR, 20), textcolor = color.white, size = size.tiny)
+
+                cntEntry += 1
+                evEntry := true
+                alert("ICT Silver Bullet | " + (dir == 1 ? "LONG" : "SHORT") + "\nWindow: " + f_winName(curWin) + "\nEntry: " + f_px(ent) + "\nSL: " + f_px(sl) + "\nTP: " + f_px(tp) + "\nRR: 1:" + str.tostring(tgtR, "#.##"), alert.freq_once_per_bar_close)
+
+    // window exhausted?
+    if winActive and not tActive and tradesWin >= maxTrades
+        state := ST_DONE
+
+// ================================================================ PLOTS =====
+color wCol = winId == 1 ? color.new(#3179f5, 93) : winId == 2 ? color.new(#f5a623, 93) : winId == 3 ? color.new(#9b59b6, 93) : na
+bgcolor(showWin and winActive ? wCol : na, title = "Silver Bullet Window")
+
+plot(useTrend ? emaV : na, "Macro EMA", color = color.new(C_DIM, 45), linewidth = 1)
+
+plotshape(showSwp and evSwpBull, "Bullish Liquidity Sweep", shape.triangleup,   location.belowbar, C_BULL, size = size.tiny)
+plotshape(showSwp and evSwpBear, "Bearish Liquidity Sweep", shape.triangledown, location.abovebar, C_BEAR, size = size.tiny)
+
+var label tfWarn = na
+if barstate.islast and barsPerWin < 12
+    if not na(tfWarn)
+        label.delete(tfWarn)
+    tfWarn := label.new(bar_index, high, "TIMEFRAME DEMASIADO ALTO\n" + str.tostring(barsPerWin, "#.#") + " velas por ventana de 60 min.\nUsa 1m - 5m: el modelo necesita sweep + MSS + FVG + retest dentro de la hora.", style = label.style_label_down, color = color.new(#f5a623, 10), textcolor = color.white, size = size.small)
+
+// ============================================================== ALERTS ======
+alertcondition(evWinStart, "Silver Bullet Window Started", "ICT Silver Bullet: window started")
+alertcondition(evSweep,    "Liquidity Sweep",              "ICT Silver Bullet: liquidity sweep")
+alertcondition(evMSS,      "MSS Confirmed",                "ICT Silver Bullet: MSS confirmed")
+alertcondition(evFvg,      "FVG Created",                  "ICT Silver Bullet: FVG created")
+alertcondition(evEntry,    "Entry",                        "ICT Silver Bullet: entry triggered")
+alertcondition(evTP,       "TP Hit",                       "ICT Silver Bullet: take profit hit")
+alertcondition(evSL,       "SL Hit",                       "ICT Silver Bullet: stop loss hit")
+
+// ====================================================== STATISTICS PANEL ====
+var table stTbl  = na
+var bool  stInit = false
+
+if showStats and not stInit
+    stTbl := table.new(statsPos == "Top Left" ? position.top_left : statsPos == "Bottom Right" ? position.bottom_right : statsPos == "Bottom Left" ? position.bottom_left : position.top_right, 10, 8, bgcolor = color.new(C_PANEL, 8), frame_color = color.new(C_DIM, 55), frame_width = 1, border_color = color.new(C_DIM, 80), border_width = 1)
+    for c = 0 to 9
+        for r = 0 to 7
+            table.cell(stTbl, c, r, "", text_color = C_TXT, text_size = size.small)
+    table.merge_cells(stTbl, 0, 0, 9, 0)
+    table.merge_cells(stTbl, 0, 1, 9, 1)
+    for r = 2 to 5
+        table.merge_cells(stTbl, 0, r, 4, r)
+        table.merge_cells(stTbl, 5, r, 9, r)
+    table.merge_cells(stTbl, 0, 6, 9, 6)
+    table.cell_set_text_halign(stTbl, 0, 0, text.align_left)
+    table.cell_set_text_halign(stTbl, 0, 1, text.align_left)
+    table.cell_set_text_halign(stTbl, 0, 6, text.align_left)
+    for r = 2 to 5
+        table.cell_set_text_halign(stTbl, 0, r, text.align_left)
+        table.cell_set_text_halign(stTbl, 5, r, text.align_right)
+    table.cell_set_text(stTbl, 0, 0, "ICT SILVER BULLET")
+    table.cell_set_text_color(stTbl, 0, 0, color.white)
+    table.cell_set_text(stTbl, 0, 1, "by @nico66fx")
+    table.cell_set_text_color(stTbl, 0, 1, color.new(C_DIM, 10))
+    table.cell_set_text_size(stTbl, 0, 1, size.tiny)
+    table.cell_set_text(stTbl, 0, 2, "WIN RATE")
+    table.cell_set_text(stTbl, 0, 3, "TOTAL R")
+    table.cell_set_text(stTbl, 0, 4, "AVG R")
+    table.cell_set_text(stTbl, 0, 6, "LAST TRADES")
+    table.cell_set_text_color(stTbl, 0, 6, color.new(C_DIM, 10))
+    table.cell_set_text_size(stTbl, 0, 6, size.tiny)
+    stInit := true
+
+if showStats and stInit and barstate.islast
+    int   n   = array.size(rHist)
+    int   wins = 0
+    float tot  = 0.0
+    if n > 0
+        for i = 0 to n - 1
+            float v = array.get(rHist, i)
+            tot += v
+            if v > 0
+                wins += 1
+    float wr  = n > 0 ? 100.0 * wins / n : 0.0
+    float avg = n > 0 ? tot / n : 0.0
+    float lastN = 0.0
+    int   startI = n - statsLook > 0 ? n - statsLook : 0
+    if n > 0
+        for i = startI to n - 1
+            lastN += array.get(rHist, i)
+
+    table.cell_set_text(stTbl, 5, 2, n > 0 ? str.tostring(wr, "0.0") + "%" : "-")
+    table.cell_set_text_color(stTbl, 5, 2, n == 0 ? C_DIM : wr >= 50 ? C_BULL : C_BEAR)
+    table.cell_set_text(stTbl, 5, 3, n > 0 ? f_rTxt1(tot) : "-")
+    table.cell_set_text_color(stTbl, 5, 3, n == 0 ? C_DIM : tot >= 0 ? C_BULL : C_BEAR)
+    table.cell_set_text(stTbl, 5, 4, n > 0 ? f_rTxt2(avg) : "-")
+    table.cell_set_text_color(stTbl, 5, 4, n == 0 ? C_DIM : avg >= 0 ? C_BULL : C_BEAR)
+    table.cell_set_text(stTbl, 0, 5, "LAST " + str.tostring(statsLook) + " R")
+    table.cell_set_text(stTbl, 5, 5, n > 0 ? f_rTxt1(lastN) : "-")
+    table.cell_set_text_color(stTbl, 5, 5, n == 0 ? C_DIM : lastN >= 0 ? C_BULL : C_BEAR)
+
+    int shown = n < 10 ? n : 10
+    for c = 0 to 9
+        if c < shown
+            float v = array.get(rHist, n - shown + c)
+            table.cell_set_text(stTbl, c, 7, f_rTxt(v))
+            table.cell_set_text_color(stTbl, c, 7, v >= 0 ? C_BULL : C_BEAR)
+            table.cell_set_text_size(stTbl, c, 7, size.tiny)
+        else
+            table.cell_set_text(stTbl, c, 7, "")
+
+// =========================================================== DEBUG PANEL ====
+var table dbTbl  = na
+var bool  dbInit = false
+
+if debugMode and not dbInit
+    dbTbl := table.new(position.bottom_left, 2, 18, bgcolor = color.new(C_PANEL, 12), frame_color = color.new(C_DIM, 55), frame_width = 1, border_color = color.new(C_DIM, 85), border_width = 1)
+    for c = 0 to 1
+        for r = 0 to 17
+            table.cell(dbTbl, c, r, "", text_color = C_TXT, text_size = size.tiny, text_halign = text.align_left)
+    for r = 0 to 17
+        table.cell_set_text_halign(dbTbl, 1, r, text.align_right)
+    dbInit := true
+
+if debugMode and dbInit and barstate.islast
+    table.cell_set_text(dbTbl, 0, 0, "DEBUG")
+    table.cell_set_text_color(dbTbl, 0, 0, color.white)
+    table.cell_set_text(dbTbl, 1, 0, "ICT SB")
+    table.cell_set_text_color(dbTbl, 1, 0, color.new(C_DIM, 10))
+    table.cell_set_text(dbTbl, 0, 1,  "current window")
+    table.cell_set_text(dbTbl, 1, 1,  winActive ? f_winName(winId) : "-")
+    table.cell_set_text(dbTbl, 0, 2,  "current state")
+    table.cell_set_text(dbTbl, 1, 2,  f_stateName(state))
+    table.cell_set_text(dbTbl, 0, 3,  "bias")
+    table.cell_set_text(dbTbl, 1, 3,  bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "-")
+    table.cell_set_text(dbTbl, 0, 4,  "prev swing high")
+    table.cell_set_text(dbTbl, 1, 4,  na(lastPH) ? "-" : f_px(lastPH))
+    table.cell_set_text(dbTbl, 0, 5,  "prev swing low")
+    table.cell_set_text(dbTbl, 1, 5,  na(lastPL) ? "-" : f_px(lastPL))
+    table.cell_set_text(dbTbl, 0, 6,  "sweep direction")
+    table.cell_set_text(dbTbl, 1, 6,  dbgSwp == 1 ? "BULLISH" : dbgSwp == -1 ? "BEARISH" : "-")
+    table.cell_set_text(dbTbl, 0, 7,  "MSS level")
+    table.cell_set_text(dbTbl, 1, 7,  na(mssRef) ? "-" : f_px(mssRef))
+    table.cell_set_text(dbTbl, 0, 8,  "FVG top / bot")
+    table.cell_set_text(dbTbl, 1, 8,  na(dbgFTop) ? "-" : f_px(dbgFTop) + " / " + f_px(dbgFBot))
+    table.cell_set_text(dbTbl, 0, 9,  "FVG size")
+    table.cell_set_text(dbTbl, 1, 9,  na(dbgFSz) ? "-" : str.tostring(dbgFSz, format.mintick))
+    table.cell_set_text(dbTbl, 0, 10, "displacement size")
+    table.cell_set_text(dbTbl, 1, 10, na(dbgDisp) ? "-" : str.tostring(dbgDisp, format.mintick))
+    table.cell_set_text(dbTbl, 0, 11, "entry")
+    table.cell_set_text(dbTbl, 1, 11, na(tEntry) ? "-" : f_px(tEntry))
+    table.cell_set_text(dbTbl, 0, 12, "stop loss")
+    table.cell_set_text(dbTbl, 1, 12, na(tSL) ? "-" : f_px(tSL))
+    table.cell_set_text(dbTbl, 0, 13, "take profit")
+    table.cell_set_text(dbTbl, 1, 13, na(tTP) ? "-" : f_px(tTP))
+    table.cell_set_text(dbTbl, 0, 14, "trades this window")
+    table.cell_set_text(dbTbl, 1, 14, str.tostring(tradesWin) + " / " + str.tostring(maxTrades))
+    table.cell_set_text(dbTbl, 0, 15, "funnel  W/S/M/F/E")
+    table.cell_set_text(dbTbl, 1, 15, str.tostring(cntWin) + "/" + str.tostring(cntSweep) + "/" + str.tostring(cntMSS) + "/" + str.tostring(cntFvg) + "/" + str.tostring(cntEntry))
+    table.cell_set_text_color(dbTbl, 1, 15, cntEntry > 0 ? C_BULL : color.new(#f5a623, 0))
+    table.cell_set_text(dbTbl, 0, 16, "bars loaded")
+    table.cell_set_text(dbTbl, 1, 16, str.tostring(bar_index + 1))
+    table.cell_set_text(dbTbl, 0, 17, "bars per window")
+    table.cell_set_text(dbTbl, 1, 17, str.tostring(barsPerWin, "#.#"))
+    table.cell_set_text_color(dbTbl, 1, 17, barsPerWin >= 20 ? C_BULL : barsPerWin >= 12 ? color.new(#f5a623, 0) : C_BEAR)

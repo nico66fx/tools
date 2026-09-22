@@ -1,0 +1,813 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+//  LIQUIDITY MAGNET
+//  © nico66fx
+//
+//  Localiza las bolsas de liquidez que deja el precio en máximos y mínimos
+//  pivote, agrupa las que están al mismo nivel y las ordena por peso según
+//  volumen, distancia, edad y momento, marcando cuál tira más ahora mismo.
+//
+//  REPINTADO · REPINTA PARCIALMENTE, y conviene decirlo tal cual: los NIVELES
+//  no repintan (salen de pivotes ya confirmados y aparecen con el retardo de
+//  "Velas del pivote"), pero el RANKING sí es una foto del momento: se
+//  recalcula en cada vela con el precio actual, así que el objetivo principal
+//  puede cambiar. No hay ninguna llamada a request.security ni lookahead en
+//  todo el archivo. El registro histórico y sus porcentajes se consolidan solo
+//  con la vela cerrada, de modo que lo que ves en directo coincide con el
+//  histórico.
+// ═════════════════════════════════════════════════════════════════════════════
+indicator("Liquidity Magnet [nico66fx]", "Liq. Magnet · nico66fx", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  1 · ENTRADAS
+// ═════════════════════════════════════════════════════════════════════════════
+gDet = "① Detección de liquidez"
+pivotLen   = input.int(10, "Velas del pivote", minval = 2, group = gDet,
+     tooltip = "Velas a cada lado que hacen falta para confirmar un máximo o mínimo pivote. Cuanto más alto, menos zonas y más significativas. 10 funciona bien de 1H hacia arriba; prueba 5-7 para scalping intradía.\nOJO: este número es también el RETARDO. Con 10, una zona aparece 10 velas después de haberse formado.")
+maxPools   = input.int(25, "Máximo de zonas activas", minval = 5, maxval = 50, group = gDet,
+     tooltip = "Número máximo de zonas seguidas a la vez. Al pasarse, se descartan las más antiguas. Más zonas = gráfico más cargado pero más cobertura histórica.")
+minAge     = input.int(3, "Edad mínima de la zona (velas)", minval = 1, group = gDet,
+     tooltip = "Las zonas más nuevas que esto puntúan menos. Reduce el ruido de los pivotes recién formados que aún no se han puesto a prueba.")
+maxAge     = input.int(500, "Edad máxima de la zona (velas)", minval = 50, group = gDet,
+     tooltip = "Las zonas más viejas que esto se eliminan. Evita que niveles antiquísimos ensucien el gráfico.")
+
+gEq = "② Agrupación de máximos/mínimos iguales"
+autoEqTol  = input.bool(true, "Ajustar la tolerancia a la temporalidad", group = gEq,
+     tooltip = "Si está activado, la tolerancia de agrupación se elige sola según la temporalidad del gráfico: 10 % en 1S, 8 % en 1D, 5 % en 4H, 0,8 % en 1H, 0,5 % en 15m y 0,15 % por debajo.\nAVISO: en 4H, 1D y 1S estos valores son MUY generosos y pueden fundir en una sola zona máximos que tú no considerarías iguales. Si en esas temporalidades ves una única zona ⊜ enorme, desactiva esto y pon un valor manual.")
+manualEqTol = input.float(0.15, "Tolerancia manual (%)", minval = 0.0, step = 0.05, group = gEq,
+     tooltip = "Se usa cuando el ajuste automático está desactivado. Dos pivotes del mismo lado que estén dentro de este porcentaje se funden en una única zona de liquidez igual.")
+eqBonus    = input.float(1.7, "Bonificación por niveles iguales", minval = 1.0, step = 0.1, group = gEq,
+     tooltip = "Multiplicador de puntuación de las zonas fusionadas. Más alto = las zonas formadas por varios toques mandan más en el ranking.")
+
+gDist = "③ Filtro de distancia (escala logarítmica)"
+autoScale  = input.bool(true, "Ajustar el tope a la temporalidad", group = gDist,
+     tooltip = "Si está activado, el tope de distancia logarítmica se elige solo: 0,95 en 1S, 0,65 en 1D, 0,45 en 4H, 0,30 en 1H, 0,18 en 15m y 0,10 por debajo.")
+manualLogD = input.float(0.45, "Distancia logarítmica manual", minval = 0.05, maxval = 2.0, step = 0.05, group = gDist,
+     tooltip = "Se usa cuando el ajuste automático está desactivado. Distancia máxima admitida en escala logarítmica; es simétrica: 0,45 abarca en torno a ±57 % desde el precio, 0,95 en torno a ±160 %.")
+
+gScore = "④ Puntuación (pesos)"
+wStrength  = input.float(1.0, "Peso de la fuerza", minval = 0.0, step = 0.1, group = gScore,
+     tooltip = "Cuánto influye el volumen que había cuando se formó el pivote. Más alto = mandan las zonas nacidas en velas de mucho volumen.")
+wProximity = input.float(1.2, "Peso de la proximidad", minval = 0.0, step = 0.1, group = gScore,
+     tooltip = "Cuánto influye la distancia al precio actual. Más alto = las zonas cercanas se imponen en el ranking.")
+wAge       = input.float(0.6, "Peso de la edad", minval = 0.0, step = 0.1, group = gScore,
+     tooltip = "Cuánto influye la edad de la zona. Más alto = pesa más la curva de madurez (las recién nacidas flojas, las maduras fuertes, las antiquísimas decaen).")
+wMomentum  = input.float(0.9, "Peso del momento", minval = 0.0, step = 0.1, group = gScore,
+     tooltip = "Cuánto influye que el momento actual apunte hacia cada zona. Más alto = la dirección del momento inclina más el ranking.")
+
+gVis = "⑤ Visual"
+showZones    = input.bool(true, "Mostrar zonas de liquidez", group = gVis,
+     tooltip = "Interruptor principal de todas las cajas y líneas sobre el gráfico.")
+showTop      = input.bool(true, "Resaltar el OBJETIVO PRINCIPAL", group = gVis,
+     tooltip = "Dibuja la zona de mayor peso con el color destacado y una línea más gruesa.")
+showLabels   = input.bool(true, "Mostrar etiquetas de peso", group = gVis,
+     tooltip = "Muestra el porcentaje de peso de cada zona a la derecha del gráfico.")
+showDash     = input.bool(true, "Mostrar panel", group = gVis,
+     tooltip = "Interruptor principal del panel informativo.")
+showStats    = input.bool(true, "Mostrar estadística de barridos en el panel", group = gVis,
+     tooltip = "Añade al panel el porcentaje histórico de objetivos que acabaron barridos y cuántos siguen pendientes. Funciona siempre: no depende del interruptor de marcas históricas.")
+showLegend   = input.bool(true, "Mostrar leyenda en el panel", group = gVis,
+     tooltip = "Añade una fila al final del panel explicando los símbolos.")
+showStatus   = input.bool(true, "Mostrar punto de estado en el panel", group = gVis,
+     tooltip = "Punto de color en la cabecera del panel: verde cuando el momento acompaña a la dirección del objetivo principal, rojo cuando va en contra, gris cuando no hay nada claro.")
+showProgress = input.bool(true, "Mostrar barra de proximidad", group = gVis,
+     tooltip = "Barra visual en el panel: 0 % = lejísimos del objetivo principal, 100 % = el precio ya lo ha alcanzado.")
+showTop3     = input.bool(true, "Mostrar los 3 mejores objetivos", group = gVis,
+     tooltip = "Añade bajo las métricas principales las tres zonas de más peso. Útil para ver alternativas al objetivo único.")
+zoneExt      = input.int(20, "Extensión de las zonas (velas a la derecha)", minval = 0, group = gVis,
+     tooltip = "Cuánto se prolongan las cajas hacia la derecha de la vela actual. Más = más sitio para las etiquetas, pero tapa más gráfico.")
+
+gHist = "⑥ Registro histórico (barra a barra)"
+showHistory    = input.bool(false, "Mostrar objetivos principales anteriores", group = gHist,
+     tooltip = "Desactivado por defecto. Al activarlo coloca marcas pequeñas donde estuvieron los objetivos principales anteriores, con su desenlace: barrido o caducado. Funciona con la reproducción barra a barra.")
+trackingWindow = input.int(100, "Ventana de seguimiento (velas)", minval = 20, maxval = 500, group = gHist,
+     tooltip = "Cuántas velas se espera a que el precio alcance un antiguo objetivo antes de darlo por caducado. Ventana grande = más indulgente; pequeña = más exigente.")
+maxHistory     = input.int(100, "Máximo de marcas históricas", minval = 10, maxval = 300, group = gHist,
+     tooltip = "Número máximo de registros guardados. Los más antiguos se descartan primero.")
+histMarkerSize = input.string("Normal", "Tamaño de las marcas históricas", options = ["Diminuto", "Pequeño", "Normal", "Grande", "Enorme"], group = gHist,
+     tooltip = "Tamaño de los símbolos ✓ y ✗ sobre el gráfico.")
+
+gMag = "⑦ Imán y línea de campo"
+showMagnet  = input.bool(true, "Mostrar el imán sobre la zona principal", group = gMag,
+     tooltip = "Coloca el símbolo del imán sobre la zona de mayor peso.")
+magnetSize  = input.string("Grande", "Tamaño del imán", options = ["Diminuto", "Pequeño", "Normal", "Grande", "Enorme"], group = gMag,
+     tooltip = "Tamaño del símbolo del imán.")
+showField   = input.bool(true, "Mostrar la línea de campo", group = gMag,
+     tooltip = "Línea discontinua desde el precio actual hasta el objetivo principal. Visualiza hacia dónde tira.")
+fieldStyle  = input.string("Diagonal", "Estilo de la línea", options = ["Diagonal", "Vertical"], group = gMag,
+     tooltip = "Diagonal se aleja hacia la derecha en ángulo; Vertical cae en recto desde el precio hasta la zona.")
+fieldOffset = input.int(20, "Alcance de la diagonal (velas)", minval = 10, maxval = 100, group = gMag,
+     tooltip = "Solo para el estilo Diagonal. Cuánto se aleja el extremo de la línea. Más = ángulo más tendido.")
+
+gSize = "⑧ Tamaños de interfaz"
+dashPosStr    = input.string("Arriba derecha", "Posición del panel", options = ["Arriba derecha", "Arriba izquierda", "Abajo derecha", "Abajo izquierda", "Centro derecha", "Centro izquierda"], group = gSize,
+     tooltip = "Esquina del gráfico donde se ancla el panel.")
+dashSizeStr   = input.string("Pequeño", "Texto del panel", options = ["Diminuto", "Pequeño", "Normal", "Grande", "Enorme"], group = gSize,
+     tooltip = "Tamaño de letra del panel. Usa Normal o Grande para capturas y para grabar vídeo.")
+lblSizeStr    = input.string("Pequeño", "Texto de las etiquetas", options = ["Diminuto", "Pequeño", "Normal", "Grande"], group = gSize,
+     tooltip = "Tamaño de letra de las etiquetas de las zonas normales.")
+topLblSizeStr = input.string("Normal", "Texto de la etiqueta principal", options = ["Pequeño", "Normal", "Grande", "Enorme"], group = gSize,
+     tooltip = "Tamaño de letra de la etiqueta de la zona principal. Un punto más grande ayuda a que salte a la vista.")
+
+gCol = "⑨ Colores"
+colHigh     = input.color(#f7768e, "Liquidez por arriba", group = gCol,
+     tooltip = "Color de las zonas que quedan por encima del precio actual.")
+colLow      = input.color(#73daca, "Liquidez por abajo", group = gCol,
+     tooltip = "Color de las zonas que quedan por debajo del precio actual.")
+colTop      = input.color(#e0af68, "Objetivo principal", group = gCol,
+     tooltip = "Color de la zona de mayor peso, del imán y de la línea de campo.")
+colField    = input.color(#bb9af7, "Línea de campo", group = gCol,
+     tooltip = "Color de la línea discontinua que une el precio con el objetivo principal.")
+colHistOK   = input.color(#9ece6a, "Histórico: barrido", group = gCol,
+     tooltip = "Color del ✓ sobre los antiguos objetivos que el precio acabó alcanzando.")
+colHistFail = input.color(#565f89, "Histórico: caducado", group = gCol,
+     tooltip = "Color del ✗ sobre los antiguos objetivos que no se alcanzaron dentro de la ventana de seguimiento.")
+colDashBg   = input.color(#16161e, "Fondo del panel", group = gCol)
+colDashBdr  = input.color(#292e42, "Borde del panel", group = gCol)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  2 · TIPOS
+// ═════════════════════════════════════════════════════════════════════════════
+// Una bolsa de liquidez viva, con sus dibujos asociados.
+type Pool
+    float price
+    int   barIdx
+    bool  isHigh
+    bool  isEqual
+    float volAt
+    float score
+    float probPct
+    box   bx
+    line  ln
+    label lbl
+
+// Un objetivo principal que dejó de serlo. status: 0 pendiente · 1 barrido · 2 caducado.
+type HistMagnet
+    float price
+    int   recordedBar
+    bool  isHigh
+    int   status
+    int   resolvedBar
+
+// Copia ligera de una zona, solo para ordenar el "top 3" del panel.
+type RankedPool
+    float price
+    float prob
+    bool  isHigh
+    bool  isEqual
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  3 · ESTADO
+// ═════════════════════════════════════════════════════════════════════════════
+var array<Pool>       pools        = array.new<Pool>()
+var array<HistMagnet> history      = array.new<HistMagnet>()
+var array<label>      histLabels   = array.new<label>()
+var array<RankedPool> top3         = array.new<RankedPool>()
+var line              fieldLn      = na
+var label             magnetMarker = na
+var int               touchCount   = 0
+var int               expiredCount = 0
+
+var float prevTopPrice  = na
+var bool  prevTopIsHigh = false
+
+atrV   = ta.atr(14)
+momRaw = ta.ema(close, 8) - ta.ema(close, 21)
+volMa  = ta.sma(volume, 50)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  4 · AJUSTE AUTOMÁTICO POR TEMPORALIDAD
+// ═════════════════════════════════════════════════════════════════════════════
+tfSec = timeframe.in_seconds(timeframe.period)
+
+autoLogD = 0.30
+if tfSec >= 604800
+    autoLogD := 0.95
+else if tfSec >= 86400
+    autoLogD := 0.65
+else if tfSec >= 14400
+    autoLogD := 0.45
+else if tfSec >= 3600
+    autoLogD := 0.30
+else if tfSec >= 900
+    autoLogD := 0.18
+else
+    autoLogD := 0.10
+
+logDistMax = autoScale ? autoLogD : manualLogD
+
+autoEqPct = 0.15
+if tfSec >= 604800
+    autoEqPct := 10
+else if tfSec >= 86400
+    autoEqPct := 8
+else if tfSec >= 14400
+    autoEqPct := 5
+else if tfSec >= 3600
+    autoEqPct := 0.8
+else if tfSec >= 900
+    autoEqPct := 0.5
+else
+    autoEqPct := 0.15
+
+eqTolPct = (autoEqTol ? autoEqPct : manualEqTol) / 100.0
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  5 · AUXILIARES
+// ═════════════════════════════════════════════════════════════════════════════
+// Distancia en escala logarítmica: mide igual un 10 % arriba que un 10 % abajo.
+logDist(float a, float b) =>
+    (a > 0 and b > 0) ? math.abs(math.log(a / b)) : 1e10
+
+// Busca la zona del mismo lado más cercana dentro de la tolerancia de "iguales".
+findClosestPool(float newPrice, bool isHigh) =>
+    idx     = -1
+    minDist = 1e10
+    sz      = array.size(pools)
+    if sz > 0
+        for i = 0 to sz - 1
+            p = array.get(pools, i)
+            if p.isHigh == isHigh
+                // FIX: el denominador va en valor absoluto. Con precios negativos
+                // (spreads, algún continuo) la división daba un porcentaje negativo
+                // y fusionaba zonas que no tenían nada que ver.
+                diff = math.abs(p.price - newPrice) / math.abs(newPrice)
+                if diff <= eqTolPct and diff < minDist
+                    minDist := diff
+                    idx     := i
+    idx
+
+clearPoolDraws(Pool p) =>
+    if not na(p.bx)
+        box.delete(p.bx)
+    if not na(p.ln)
+        line.delete(p.ln)
+    if not na(p.lbl)
+        label.delete(p.lbl)
+
+// ¿Hay ya un registro histórico SIN resolver para este mismo nivel y lado?
+// Evita que el mismo precio entre varias veces en la estadística cuando el
+// ranking oscila y una zona pierde y recupera el primer puesto.
+hasPendingHist(float px, bool isHigh) =>
+    found = false
+    if array.size(history) > 0 and not na(px)
+        for i = 0 to array.size(history) - 1
+            h = array.get(history, i)
+            if h.status == 0 and h.isHigh == isHigh and math.abs(h.price - px) <= syminfo.mintick * 5
+                found := true
+    found
+
+strToSize(string s) =>
+    result = size.small
+    if s == "Diminuto"
+        result := size.tiny
+    else if s == "Pequeño"
+        result := size.small
+    else if s == "Normal"
+        result := size.normal
+    else if s == "Grande"
+        result := size.large
+    else if s == "Enorme"
+        result := size.huge
+    result
+
+strToPos(string s) =>
+    result = position.top_right
+    if s == "Arriba derecha"
+        result := position.top_right
+    else if s == "Arriba izquierda"
+        result := position.top_left
+    else if s == "Abajo derecha"
+        result := position.bottom_right
+    else if s == "Abajo izquierda"
+        result := position.bottom_left
+    else if s == "Centro derecha"
+        result := position.middle_right
+    else if s == "Centro izquierda"
+        result := position.middle_left
+    result
+
+dashSize   = strToSize(dashSizeStr)
+lblSize    = strToSize(lblSizeStr)
+topLblSize = strToSize(topLblSizeStr)
+magSize    = strToSize(magnetSize)
+histSize   = strToSize(histMarkerSize)
+dashPos    = strToPos(dashPosStr)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  6 · DETECCIÓN DE PIVOTES Y FUSIÓN DE NIVELES IGUALES
+//  ta.pivothigh/low solo devuelven valor cuando el pivote ya está confirmado,
+//  es decir, pivotLen velas después. Por eso el nivel no repinta: cuando
+//  aparece, ya no se mueve.
+// ═════════════════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+
+if not na(ph)
+    mIdx = findClosestPool(ph, true)
+    if mIdx >= 0
+        existing = array.get(pools, mIdx)
+        existing.isEqual := true
+        existing.price   := math.max(existing.price, ph)
+        existing.volAt   := existing.volAt + volume[pivotLen]
+        array.set(pools, mIdx, existing)
+    else
+        array.push(pools, Pool.new(ph, bar_index - pivotLen, true, false, volume[pivotLen], 0.0, 0.0, na, na, na))
+
+if not na(pl)
+    mIdx = findClosestPool(pl, false)
+    if mIdx >= 0
+        existing = array.get(pools, mIdx)
+        existing.isEqual := true
+        existing.price   := math.min(existing.price, pl)
+        existing.volAt   := existing.volAt + volume[pivotLen]
+        array.set(pools, mIdx, existing)
+    else
+        array.push(pools, Pool.new(pl, bar_index - pivotLen, false, false, volume[pivotLen], 0.0, 0.0, na, na, na))
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  7 · LIMPIEZA: barridas, viejas y demasiado lejanas
+// ═════════════════════════════════════════════════════════════════════════════
+prevTopWasSweptThisBar = false
+
+ii = array.size(pools) - 1
+while ii >= 0
+    p      = array.get(pools, ii)
+    age    = bar_index - p.barIdx
+    swept  = (p.isHigh and high > p.price) or (not p.isHigh and low < p.price)
+    tooOld = age > maxAge
+    lDist  = logDist(p.price, close)
+    tooFar = lDist > logDistMax
+
+    // ¿Esta zona es la que era el objetivo principal en la vela cerrada anterior?
+    isPrevTop = not na(prevTopPrice) and math.abs(p.price - prevTopPrice) < syminfo.mintick * 5 and p.isHigh == prevTopIsHigh
+
+    if swept
+        if isPrevTop
+            prevTopWasSweptThisBar := true
+        clearPoolDraws(p)
+        array.remove(pools, ii)
+    else if tooOld
+        clearPoolDraws(p)
+        array.remove(pools, ii)
+    else if tooFar
+        clearPoolDraws(p)
+        array.remove(pools, ii)
+    ii -= 1
+
+while array.size(pools) > maxPools
+    pShift = array.shift(pools)
+    clearPoolDraws(pShift)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  8 · PUNTUACIÓN
+//  Cuatro factores ponderados. El resultado NO es una probabilidad estadística:
+//  es el peso relativo de cada zona frente a la suma de todas.
+// ═════════════════════════════════════════════════════════════════════════════
+calcScore(Pool p) =>
+    age   = bar_index - p.barIdx
+    lDist = logDist(p.price, close)
+
+    // FIX: faltaba comprobar na(volMa). En los primeros 50 compases, o en un
+    // símbolo sin volumen, volMa es na y toda la puntuación se volvía na, con
+    // lo que no salía ningún objetivo principal.
+    volFactor = (na(p.volAt) or na(volMa) or volMa <= 0) ? 1.0 : math.min(p.volAt / volMa, 3.0)
+    eqMult    = p.isEqual ? eqBonus : 1.0
+    strength  = volFactor * eqMult
+
+    // Curva de proximidad: penaliza lo pegadísimo al precio, premia la distancia
+    // de trabajo (en torno al 2 % logarítmico) y decae a partir de ahí.
+    prox = 0.0
+    if lDist < 0.002
+        prox := 0.3
+    else if lDist < 0.05
+        prox := math.max(0.5, 1.0 - math.abs(lDist - 0.02) * 10.0)
+    else
+        // FIX: esta rama arrancaba en 1.0 justo donde la anterior terminaba en
+        // 0.7, así que una zona MÁS LEJANA puntuaba MÁS que otra más cercana.
+        // Ahora enlaza en 0.7 y la curva ya no da ese salto.
+        prox := math.max(0.05, 0.7 - (lDist - 0.05) * 3.0)
+
+    // Curva de madurez: recién nacida floja, madura fuerte, antiquísima decae.
+    ageScore = 0.0
+    if age < minAge
+        ageScore := 0.5
+    else if age < 50
+        ageScore := 1.0
+    else
+        ageScore := math.max(0.1, 1.0 - (age - 50) / 450.0)
+
+    // ¿El momento actual empuja hacia esta zona o en contra?
+    dirToPool = p.price > close ? 1.0 : -1.0
+    momNorm   = close > 0 ? momRaw / close : 0.0
+    momAlign  = dirToPool * momNorm * 100.0
+    momScore  = 1.0 + math.max(-0.5, math.min(0.5, momAlign))
+
+    rawScore = strength * wStrength + prox * wProximity + ageScore * wAge + momScore * wMomentum
+    math.max(rawScore, 0.01)
+
+totalScore = 0.0
+scoreUp    = 0.0
+scoreDn    = 0.0
+topIdx     = -1
+topScore   = -1.0
+
+if array.size(pools) > 0
+    for i = 0 to array.size(pools) - 1
+        p = array.get(pools, i)
+        p.score := calcScore(p)
+        array.set(pools, i, p)
+        totalScore += p.score
+        if p.score > topScore
+            topScore := p.score
+            topIdx   := i
+
+    if totalScore > 0
+        for i = 0 to array.size(pools) - 1
+            p = array.get(pools, i)
+            p.probPct := (p.score / totalScore) * 100.0
+            array.set(pools, i, p)
+            if p.isHigh
+                scoreUp += p.score
+            else
+                scoreDn += p.score
+
+topPrice  = (topIdx >= 0 and array.size(pools) > 0) ? array.get(pools, topIdx).price   : na
+topProb   = (topIdx >= 0 and array.size(pools) > 0) ? array.get(pools, topIdx).probPct : na
+topIsHigh = (topIdx >= 0 and array.size(pools) > 0) ? array.get(pools, topIdx).isHigh  : false
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  9 · TIRÓN DEL IMÁN
+//  Cuánto del peso total está del mismo lado que el objetivo principal.
+// ═════════════════════════════════════════════════════════════════════════════
+biasMag = 0.0
+if not na(topPrice) and totalScore > 0
+    sameSidePct = topIsHigh ? scoreUp / totalScore * 100.0 : scoreDn / totalScore * 100.0
+    biasMag := sameSidePct
+biasDir = topIsHigh ? 1 : -1
+bias = biasMag * biasDir
+
+distToTopPct = na(topPrice) ? na : (topPrice - close) / close * 100.0
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  10 · LOS TRES MEJORES
+//  Ordenación parcial por selección: solo hacen falta los tres primeros.
+//  El guardián `k + 1 <= sz - 1` es obligatorio porque en Pine un for cuyo
+//  inicio supera al final cuenta hacia atrás en vez de no ejecutarse.
+// ═════════════════════════════════════════════════════════════════════════════
+array.clear(top3)
+
+if array.size(pools) > 0
+    tmpPrices = array.new<float>()
+    tmpProbs  = array.new<float>()
+    tmpHighs  = array.new<bool>()
+    tmpEquals = array.new<bool>()
+    for i = 0 to array.size(pools) - 1
+        p = array.get(pools, i)
+        array.push(tmpPrices, p.price)
+        array.push(tmpProbs,  p.probPct)
+        array.push(tmpHighs,  p.isHigh)
+        array.push(tmpEquals, p.isEqual)
+
+    sz = array.size(tmpProbs)
+    n = math.min(3, sz)
+    if n > 0
+        for k = 0 to n - 1
+            bestIdx = k
+            if k + 1 <= sz - 1
+                for j = k + 1 to sz - 1
+                    if array.get(tmpProbs, j) > array.get(tmpProbs, bestIdx)
+                        bestIdx := j
+            if bestIdx != k
+                tp = array.get(tmpPrices, k)
+                array.set(tmpPrices, k, array.get(tmpPrices, bestIdx))
+                array.set(tmpPrices, bestIdx, tp)
+                tpr = array.get(tmpProbs, k)
+                array.set(tmpProbs, k, array.get(tmpProbs, bestIdx))
+                array.set(tmpProbs, bestIdx, tpr)
+                th = array.get(tmpHighs, k)
+                array.set(tmpHighs, k, array.get(tmpHighs, bestIdx))
+                array.set(tmpHighs, bestIdx, th)
+                te = array.get(tmpEquals, k)
+                array.set(tmpEquals, k, array.get(tmpEquals, bestIdx))
+                array.set(tmpEquals, bestIdx, te)
+            array.push(top3, RankedPool.new(array.get(tmpPrices, k), array.get(tmpProbs, k), array.get(tmpHighs, k), array.get(tmpEquals, k)))
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  11 · REGISTRO HISTÓRICO  —  SOLO CON LA VELA CERRADA
+//
+//  QUÉ CAMBIA EXACTAMENTE RESPECTO A LA VERSIÓN ANTERIOR
+//  Antes este bloque entero se ejecutaba en cada tick de la vela en formación.
+//  Como el ranking se recalcula con el precio vivo, el objetivo principal podía
+//  cambiar varias veces dentro de la misma vela, y con él el contador de
+//  barridos: el porcentaje del panel subía y bajaba durante la vela y no era el
+//  mismo número que quedaba grabado al cerrar. En cámara eso se ve como que el
+//  dato "en directo" no cuadra con el del histórico.
+//  Ahora todo el bloque —alta del registro, resolución de pendientes, contadores
+//  y actualización de prevTop— vive dentro de barstate.isconfirmed. Consecuencia:
+//    · se anota como MUCHO un cambio de objetivo principal por vela cerrada;
+//    · el porcentaje que se ve en directo es el de la última vela cerrada y ya
+//      no se mueve hasta que cierre la siguiente;
+//    · ese número es idéntico al que se recalcula sobre el histórico.
+//  Contrapartida honesta: el registro se apunta al cierre, no en el tick exacto
+//  en que el ranking cambió. Es justo lo que se quiere para una métrica que se
+//  va a enseñar como prueba.
+// ═════════════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed
+    topActuallyChanged = not na(prevTopPrice) and not na(topPrice) and (math.abs(prevTopPrice - topPrice) > syminfo.mintick * 5 or prevTopIsHigh != topIsHigh)
+    topDisappeared     = not na(prevTopPrice) and na(topPrice)
+
+    // El segundo guardián evita duplicar el mismo nivel cuando una zona pierde
+    // y recupera el primer puesto varias veces: si ya está pendiente, no se
+    // vuelve a dar de alta y por tanto no se cuenta dos veces.
+    if (topActuallyChanged or topDisappeared) and not hasPendingHist(prevTopPrice, prevTopIsHigh)
+        initialStatus = prevTopWasSweptThisBar ? 1 : 0
+        resBar        = prevTopWasSweptThisBar ? bar_index : na
+        array.push(history, HistMagnet.new(prevTopPrice, bar_index, prevTopIsHigh, initialStatus, resBar))
+        if prevTopWasSweptThisBar
+            touchCount += 1
+
+    // Resolución de los registros pendientes: barrido o caducado.
+    if array.size(history) > 0
+        for i = 0 to array.size(history) - 1
+            h = array.get(history, i)
+            if h.status == 0
+                barsElapsed = bar_index - h.recordedBar
+                // FIX: comparación estricta, la misma que usa el barrido de la
+                // sección 7. Así "barrido" significa lo mismo en la estadística
+                // y en la limpieza de zonas, y no hay un caso de borde en el que
+                // un nivel cuente como alcanzado pero siga dibujado como activo.
+                touched = (h.isHigh and high > h.price) or (not h.isHigh and low < h.price)
+                if touched
+                    h.status      := 1
+                    h.resolvedBar := bar_index
+                    touchCount    += 1
+                    array.set(history, i, h)
+                else if barsElapsed >= trackingWindow
+                    h.status      := 2
+                    h.resolvedBar := bar_index
+                    expiredCount  += 1
+                    array.set(history, i, h)
+
+    while array.size(history) > maxHistory
+        array.shift(history)
+
+    prevTopPrice  := topPrice
+    prevTopIsHigh := topIsHigh
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  12 · DIBUJO DE LAS ZONAS
+//  Solo en la última vela: el indicador muestra la foto de AHORA, no un
+//  histórico de rankings. En reproducción barra a barra se redibuja en cada
+//  vela reproducida, que es lo esperable.
+// ═════════════════════════════════════════════════════════════════════════════
+intensityTransp(float pct) =>
+    int(math.max(0, 70 - pct * 4.0))
+
+if barstate.islast and showZones and array.size(pools) > 0
+    atrH = atrV * 0.04
+    for i = 0 to array.size(pools) - 1
+        p = array.get(pools, i)
+        clearPoolDraws(p)
+        isTop = (i == topIdx) and showTop
+        baseC = p.isHigh ? colHigh : colLow
+        zoneC = isTop ? colTop : color.new(baseC, intensityTransp(p.probPct))
+        lineC = isTop ? colTop : color.new(baseC, math.max(0, intensityTransp(p.probPct) - 30))
+        lineW = isTop ? 4 : 2
+        lineStyle = isTop ? line.style_solid : line.style_dotted
+
+        p.bx := box.new(p.barIdx, p.price + atrH, bar_index + zoneExt, p.price - atrH, border_color = color.new(zoneC, 60), bgcolor = color.new(zoneC, 55))
+        p.ln := line.new(p.barIdx, p.price, bar_index + zoneExt, p.price, color = lineC, width = lineW, style = lineStyle)
+
+        if showLabels
+            eqMark  = p.isEqual ? " ⊜" : ""
+            topMark = isTop ? " 🔥" : ""
+            // FIX: formato "0.0" y no "#.0". Con "#" el cero entero desaparece
+            // y un peso de 0,7 % se imprimía como ",7 %".
+            lblTxt  = str.tostring(p.probPct, "0.0") + "%" + eqMark + topMark
+            lblTxtCol = isTop ? color.black : color.new(color.white, 5)
+            curLblSize = isTop ? topLblSize : lblSize
+            p.lbl := label.new(bar_index + zoneExt, p.price, lblTxt, style = label.style_label_left, color = color.new(zoneC, 20), textcolor = lblTxtCol, size = curLblSize)
+        array.set(pools, i, p)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  13 · IMÁN Y LÍNEA DE CAMPO
+// ═════════════════════════════════════════════════════════════════════════════
+if not na(magnetMarker)
+    label.delete(magnetMarker)
+    magnetMarker := na
+if not na(fieldLn)
+    line.delete(fieldLn)
+    fieldLn := na
+
+if barstate.islast and not na(topPrice)
+    if showMagnet
+        magnetMarker := label.new(bar_index + zoneExt - 2, topPrice, "🧲", style = label.style_none, textcolor = colTop, size = magSize)
+
+    if showField
+        if fieldStyle == "Diagonal"
+            endX = bar_index + fieldOffset
+            fieldLn := line.new(bar_index, close, endX, topPrice, color = color.new(colField, 10), width = 3, style = line.style_dashed)
+        else
+            fieldLn := line.new(bar_index, close, bar_index, topPrice, color = color.new(colField, 10), width = 3, style = line.style_dashed)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  14 · MARCAS HISTÓRICAS
+//  FIX: antes esto se redibujaba en cada vela confirmada, es decir en TODAS las
+//  velas del histórico: hasta 300 etiquetas borradas y recreadas por vela. En un
+//  gráfico largo eso agota el presupuesto de cálculo. Como las marcas solo hay
+//  que verlas en el estado actual (y en barra a barra la vela reproducida ES la
+//  última), basta con barstate.islast.
+// ═════════════════════════════════════════════════════════════════════════════
+if barstate.islast
+    if array.size(histLabels) > 0
+        for i = 0 to array.size(histLabels) - 1
+            label.delete(array.get(histLabels, i))
+        array.clear(histLabels)
+
+    if showHistory and array.size(history) > 0
+        for i = 0 to array.size(history) - 1
+            h = array.get(history, i)
+            if h.status > 0
+                mark = h.status == 1 ? "✓" : "✗"
+                col  = h.status == 1 ? colHistOK : colHistFail
+                lbl  = label.new(h.recordedBar, h.price, mark, style = label.style_none, textcolor = col, size = histSize)
+                array.push(histLabels, lbl)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  15 · PANEL
+//  FIX: montado solo en la última vela. Antes se reconstruía en cada vela del
+//  histórico sin que nadie llegara a verlo.
+// ═════════════════════════════════════════════════════════════════════════════
+var table dash = table.new(dashPos, 3, 20, bgcolor = colDashBg, border_color = colDashBdr, border_width = 1, frame_color = colDashBdr, frame_width = 2)
+
+if barstate.islast
+    table.clear(dash, 0, 0, 2, 19)
+
+if barstate.islast and showDash
+    biasAbs = math.abs(bias)
+
+    biasLabel = "NEUTRO"
+    if biasAbs > 60
+        biasLabel := bias > 0 ? "TIRÓN ALCISTA FUERTE" : "TIRÓN BAJISTA FUERTE"
+    else if biasAbs > 40
+        biasLabel := bias > 0 ? "TIRÓN ALCISTA" : "TIRÓN BAJISTA"
+
+    biasCol = color.rgb(187, 154, 247)
+    if bias > 40
+        biasCol := colHigh
+    else if bias < -40
+        biasCol := colLow
+
+    // Punto de estado: ¿el momento acompaña a la dirección del objetivo?
+    statusDot = "●"
+    statusCol = color.rgb(86, 95, 137)
+    if not na(topPrice) and biasAbs > 40
+        momPositive = momRaw > 0
+        topUp = topIsHigh
+        aligned = (topUp and momPositive) or (not topUp and not momPositive)
+        if aligned and biasAbs > 60
+            statusCol := #73daca
+        else if aligned
+            statusCol := #9ece6a
+        else
+            statusCol := #f7768e
+
+    progressPct = 0.0
+    if not na(topPrice)
+        progressPct := math.max(0, math.min(100, 100 * (1 - logDist(close, topPrice) / logDistMax)))
+
+    progressBar = ""
+    barLen = 10
+    filled = int(math.round(progressPct / 100 * barLen))
+    for i = 0 to barLen - 1
+        progressBar += i < filled ? "█" : "░"
+
+    totalRes  = touchCount + expiredCount
+    touchRate = totalRes > 0 ? float(touchCount) / float(totalRes) * 100.0 : na
+
+    pendingCount = 0
+    if array.size(history) > 0
+        for i = 0 to array.size(history) - 1
+            h = array.get(history, i)
+            if h.status == 0
+                pendingCount += 1
+
+    topPriceStr  = na(topPrice) ? "—" : str.tostring(topPrice, format.mintick)
+    topProbStr   = na(topProb)  ? "—" : str.tostring(topProb, "0.0") + "%"
+    // FIX: el signo se construye a mano. Un formato "+#.00" imprime el más como
+    // texto literal y en los negativos deja cosas como "-+0.85".
+    distStr      = na(distToTopPct) ? "—" : (distToTopPct >= 0 ? "+" : "") + str.tostring(distToTopPct, "0.00") + "%"
+    intensityStr = str.tostring(biasAbs, "0.0") + "%"
+    poolsStr     = str.tostring(array.size(pools))
+    touchRateStr = na(touchRate) ? "—" : str.tostring(touchRate, "0.0") + "% (" + str.tostring(touchCount) + "/" + str.tostring(totalRes) + ")"
+    logDistStr   = str.tostring(logDistMax, "0.00") + (autoScale ? " (auto)" : " (manual)")
+    eqTolStr     = str.tostring(eqTolPct * 100.0, "0.00") + "%" + (autoEqTol ? " (auto)" : " (manual)")
+
+    labelCol = color.rgb(169, 177, 214)
+    grayCol  = color.rgb(86, 95, 137)
+
+    row = 0
+    table.cell(dash, 0, row, "⚡ LIQUIDITY MAGNET", text_color = colTop, bgcolor = colDashBg, text_size = dashSize)
+    if showStatus
+        table.cell(dash, 1, row, statusDot, text_color = statusCol, bgcolor = colDashBg, text_size = dashSize)
+    table.cell(dash, 2, row, "nico66fx", text_color = colField, bgcolor = colDashBg, text_size = size.tiny)
+    row += 1
+    table.cell(dash, 0, row, "Tirón del imán", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, biasLabel, text_color = biasCol, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+    table.cell(dash, 0, row, "Intensidad", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, intensityStr, text_color = biasCol, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+    table.cell(dash, 0, row, "Objetivo principal", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, topPriceStr, text_color = colTop, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+    table.cell(dash, 0, row, "Peso relativo", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, topProbStr, text_color = colTop, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+    table.cell(dash, 0, row, "Distancia", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, distStr, text_color = color.white, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+
+    if showProgress and not na(topPrice)
+        table.cell(dash, 0, row, "Proximidad", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+        table.merge_cells(dash, 1, row, 2, row)
+        proxColor = progressPct > 70 ? colTop : progressPct > 40 ? color.rgb(115, 218, 202) : labelCol
+        table.cell(dash, 1, row, progressBar + " " + str.tostring(progressPct, "0.0") + "%", text_color = proxColor, bgcolor = colDashBg, text_size = dashSize)
+        row += 1
+
+    table.cell(dash, 0, row, "Zonas activas", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, poolsStr, text_color = color.white, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+    table.cell(dash, 0, row, "Tope de distancia", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, logDistStr, text_color = color.white, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+    table.cell(dash, 0, row, "Tolerancia de iguales", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+    table.merge_cells(dash, 1, row, 2, row)
+    table.cell(dash, 1, row, eqTolStr, text_color = color.white, bgcolor = colDashBg, text_size = dashSize)
+    row += 1
+
+    if showTop3 and array.size(top3) > 0
+        table.cell(dash, 0, row, "3 mejores objetivos", text_color = grayCol, bgcolor = colDashBg, text_size = size.tiny)
+        table.merge_cells(dash, 1, row, 2, row)
+        table.cell(dash, 1, row, "precio · peso", text_color = grayCol, bgcolor = colDashBg, text_size = size.tiny)
+        row += 1
+        for k = 0 to array.size(top3) - 1
+            rp = array.get(top3, k)
+            arrow = rp.isHigh ? "▲" : "▼"
+            arrowCol = rp.isHigh ? colHigh : colLow
+            table.cell(dash, 0, row, arrow + " " + str.tostring(k + 1), text_color = arrowCol, bgcolor = colDashBg, text_size = dashSize)
+            table.merge_cells(dash, 1, row, 2, row)
+            eqM = rp.isEqual ? " ⊜" : ""
+            table.cell(dash, 1, row, str.tostring(rp.price, format.mintick) + "  " + str.tostring(rp.prob, "0.0") + "%" + eqM, text_color = color.white, bgcolor = colDashBg, text_size = dashSize)
+            row += 1
+
+    if showStats
+        table.cell(dash, 0, row, "% barridos (histórico)", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+        table.merge_cells(dash, 1, row, 2, row)
+        table.cell(dash, 1, row, touchRateStr, text_color = color.white, bgcolor = colDashBg, text_size = dashSize)
+        row += 1
+        if pendingCount > 0
+            table.cell(dash, 0, row, "Pendientes", text_color = labelCol, bgcolor = colDashBg, text_size = dashSize)
+            table.merge_cells(dash, 1, row, 2, row)
+            table.cell(dash, 1, row, str.tostring(pendingCount), text_color = grayCol, bgcolor = colDashBg, text_size = dashSize)
+            row += 1
+
+    if showLegend
+        table.cell(dash, 0, row, "Leyenda", text_color = grayCol, bgcolor = colDashBg, text_size = size.tiny)
+        table.merge_cells(dash, 1, row, 2, row)
+        table.cell(dash, 1, row, "🔥 Principal  ⊜ Iguales  ✓ Barrido  ✗ Caducado", text_color = grayCol, bgcolor = colDashBg, text_size = size.tiny)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  16 · ALERTAS
+// ═════════════════════════════════════════════════════════════════════════════
+newTopMagnet = ta.change(topPrice) != 0
+nearTop      = not na(topPrice) and math.abs(close - topPrice) / close < 0.005
+sweptTop     = not na(topPrice[1]) and ((topIsHigh[1] and high > topPrice[1]) or (not topIsHigh[1] and low < topPrice[1]))
+biasFlipBull = bias > 50 and bias[1] <= 50
+biasFlipBear = bias < -50 and bias[1] >= -50
+
+alertcondition(newTopMagnet, "Nuevo objetivo principal", "Liquidity Magnet: hay un objetivo principal nuevo")
+alertcondition(nearTop,      "Precio cerca del objetivo", "Liquidity Magnet: el precio se acerca al objetivo principal")
+alertcondition(sweptTop,     "Objetivo principal barrido", "Liquidity Magnet: el objetivo principal ha sido barrido")
+alertcondition(biasFlipBull, "Giro del tirón a alcista", "Liquidity Magnet: el tirón pasa a alcista")
+alertcondition(biasFlipBear, "Giro del tirón a bajista", "Liquidity Magnet: el tirón pasa a bajista")
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  17 · FIRMA
+//  FIX: la tabla se declara con var y se rellena solo en la última vela. Sin var
+//  se creaba una tabla nueva en CADA vela del gráfico, para nada.
+// ═════════════════════════════════════════════════════════════════════════════
+var table watermark = table.new(position.bottom_right, 1, 2, border_width = 2, frame_color = #292e42, frame_width = 2)
+
+if barstate.islast
+    table.cell(watermark, 0, 0, text = "nico66fx", text_color = #e0af68, text_size = size.normal, bgcolor = #16161e)
+    table.cell(watermark, 0, 1, text = "Liquidity Magnet", text_color = #73daca, text_size = size.small, bgcolor = #16161e)

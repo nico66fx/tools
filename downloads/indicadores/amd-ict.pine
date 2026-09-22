@@ -1,0 +1,354 @@
+//@version=5
+// Autor: NICO66 FX
+// Telegram: @nico66fx
+// Creamos robots e indicadores para MetaTrader.
+indicator("AMD Indicador | @nico66fx", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// --- Ajustes ---
+G_MODE = "Ajustes del Modo"
+useAdaptive = input.bool(true,
+     "Activar modo adaptativo (Price Action)",
+     group=G_MODE,
+     tooltip="Si se desactiva, se usan las sesiones horarias de abajo")
+
+G_SESS = "Modo Sesion (por horario)"
+accumTime = input.session("0000-0800", "Hora de acumulacion (GMT/UTC)", group=G_SESS)
+manipTime = input.session("0800-1000", "Hora de manipulacion", group=G_SESS)
+distTime  = input.session("1000-1600", "Hora de distribucion", group=G_SESS)
+
+G_ADAP = "Modo Adaptativo (Price Action)"
+consLength = input.int(10, "Longitud de acumulacion (velas)",
+     minval=3, group=G_ADAP,
+     tooltip="Numero de velas para detectar la consolidacion")
+rangeAtrMult = input.float(1.5, "Multiplicador de rango (ATR)",
+     minval=0.5, step=0.1, group=G_ADAP,
+     tooltip="El rango de consolidacion debe ser menor que ATR * este valor")
+atrLength = input.int(14, "Periodo ATR", minval=1, group=G_ADAP)
+
+G_FILT = "Filtros de Manipulacion (Senal)"
+useVolFilter = input.bool(true, "Confirmar con volumen",
+     group=G_FILT,
+     tooltip="El volumen de la vela de manipulacion debe ser mayor que el volumen medio")
+volMaLength = input.int(20, "Periodo MA de volumen", minval=1, group=G_FILT)
+minWickPct = input.float(30.0, "Porcentaje minimo de mecha (%)",
+     minval=0.0, maxval=100.0, step=5.0, group=G_FILT,
+     tooltip="La mecha de rechazo debe ser al menos este porcentaje del tamano total de la vela")
+confirmCloseInside = input.bool(true, "Confirmar cierre dentro del rango",
+     group=G_FILT,
+     tooltip="La vela de manipulacion debe cerrar dentro del rango de acumulacion")
+
+G_DIS = "Distribucion y Objetivos FVG"
+showFVG = input.bool(true, "Mostrar zonas FVG (Imbalance)",
+     group=G_DIS,
+     tooltip="Muestra las zonas Fair Value Gap formadas durante la distribucion")
+fvgColorBuy = input.color(color.new(color.green, 85), "Color FVG de compra (BUY)", group=G_DIS)
+fvgColorSell = input.color(color.new(color.red, 85), "Color FVG de venta (SELL)", group=G_DIS)
+
+G_COLOR = "Colores del Indicador"
+colorAcc = input.color(color.new(color.blue, 90), "Color zona de acumulacion", group=G_COLOR)
+colorMan = input.color(color.new(color.red, 90), "Color zona de manipulacion", group=G_COLOR)
+colorDis = input.color(color.new(color.green, 90), "Color zona de distribucion", group=G_COLOR)
+
+G_POS = "Ajustes de Posicion (SL/TP)"
+showPositions = input.bool(true, "Mostrar posiciones SL/TP", group=G_POS)
+atrSlMult = input.float(1.5, "Multiplicador ATR para SL",
+     minval=0.1, step=0.1, group=G_POS,
+     tooltip="Distancia SL = ATR * Multiplicador")
+rrRatio = input.float(2.0, "Ratio Riesgo:Beneficio (TP / SL)",
+     minval=0.5, step=0.1, group=G_POS,
+     tooltip="Por ejemplo: si es 2.0, la distancia TP sera 2 veces mayor que la distancia SL")
+boxWidth = input.int(20, "Ancho de las cajas SL/TP (velas)", minval=5, group=G_POS)
+showHistoricalTrades = input.bool(true, "Guardar historial de posiciones", group=G_POS)
+
+// --- Informacion de Marca ---
+var brandTable = table.new(position.top_right, 1, 2,
+     bgcolor=color.new(color.blue, 90),
+     border_width=1,
+     border_color=color.new(color.blue, 50))
+
+if barstate.islast
+    table.cell(brandTable, 0, 0, "NICO66 FX",
+         text_color=color.blue, text_size=size.small)
+    table.cell(brandTable, 0, 1, "@nico66fx",
+         text_color=color.gray, text_size=size.tiny)
+
+// --- Funciones utiles ---
+isInSession(sess) =>
+    not na(time(timeframe.period, sess, "UTC"))
+
+isAccumSession = isInSession(accumTime)
+isManipSession = isInSession(manipTime)
+isDistSession  = isInSession(distTime)
+
+// --- Variables de estado global ---
+var float accHigh = na
+var float accLow = na
+var int accStartBar = na
+var int accEndBar = na
+var box accumBox = na
+
+var int adapState = 0
+var bool adapBullSweep = false
+var bool adapBearSweep = false
+var bool sessBullSweep = false
+var bool sessBearSweep = false
+bool bullishSweepSignal = false
+bool bearishSweepSignal = false
+
+atr = ta.atr(atrLength)
+highestHigh = ta.highest(high, consLength)
+lowestLow = ta.lowest(low, consLength)
+currentRange = highestHigh - lowestLow
+isConsolidated = currentRange <= atr * rangeAtrMult
+
+volMa = ta.sma(volume, volMaLength)
+isHighVolume = not useVolFilter or volume > volMa
+
+candleRange = high - low
+upperWick = high - math.max(open, close)
+upperWickPct = candleRange > 0 ? (upperWick / candleRange) * 100.0 : 0.0
+isWickOkBearish = upperWickPct >= minWickPct
+
+lowerWick = math.min(open, close) - low
+lowerWickPct = candleRange > 0 ? (lowerWick / candleRange) * 100.0 : 0.0
+isWickOkBullish = lowerWickPct >= minWickPct
+
+// --- Logica Principal ---
+if useAdaptive
+    if isConsolidated
+        if adapState != 1
+            adapState := 1
+            accHigh := highestHigh
+            accLow := lowestLow
+            accStartBar := bar_index - consLength + 1
+            accEndBar := bar_index
+            adapBullSweep := false
+            adapBearSweep := false
+            accumBox := box.new(left=accStartBar, top=accHigh,
+                 right=bar_index, bottom=accLow, bgcolor=colorAcc,
+                 border_color=color.blue, border_style=line.style_dashed)
+        else
+            accHigh := highestHigh
+            accLow := lowestLow
+            accEndBar := bar_index
+            box.set_top(accumBox, accHigh)
+            box.set_bottom(accumBox, accLow)
+            box.set_right(accumBox, bar_index)
+    else
+        if adapState == 1
+            adapState := 2
+            accEndBar := bar_index
+            box.set_right(accumBox, accEndBar)
+
+        if adapState == 2
+            if (bar_index - accEndBar) > consLength * 3
+                adapState := 0
+            else
+                if low < accLow and not adapBullSweep
+                    if (not confirmCloseInside or close > accLow) and
+                         isWickOkBullish and isHighVolume
+                        bullishSweepSignal := true
+                        adapBullSweep := true
+                        adapState := 3
+                        box.new(left=accEndBar, top=accLow,
+                             right=bar_index, bottom=low,
+                             bgcolor=color.new(color.green, 90),
+                             border_color=color.green,
+                             border_style=line.style_solid)
+
+                if high > accHigh and not adapBearSweep
+                    if (not confirmCloseInside or close < accHigh) and
+                         isWickOkBearish and isHighVolume
+                        bearishSweepSignal := true
+                        adapBearSweep := true
+                        adapState := 3
+                        box.new(left=accEndBar, top=high,
+                             right=bar_index, bottom=accHigh,
+                             bgcolor=color.new(color.red, 90),
+                             border_color=color.red,
+                             border_style=line.style_solid)
+else
+    if isAccumSession
+        if not isAccumSession[1]
+            accHigh := high
+            accLow := low
+            accStartBar := bar_index
+            accEndBar := bar_index
+            sessBullSweep := false
+            sessBearSweep := false
+            accumBox := box.new(left=accStartBar, top=accHigh,
+                 right=bar_index, bottom=accLow, bgcolor=colorAcc,
+                 border_color=color.blue, border_style=line.style_dashed)
+        else
+            accHigh := math.max(accHigh, high)
+            accLow := math.min(accLow, low)
+            accEndBar := bar_index
+            box.set_top(accumBox, accHigh)
+            box.set_bottom(accumBox, accLow)
+            box.set_right(accumBox, bar_index)
+    else
+        if isAccumSession[1]
+            accEndBar := bar_index
+            box.set_right(accumBox, accEndBar)
+
+    if isManipSession
+        if low < accLow and not sessBullSweep
+            if (not confirmCloseInside or close > accLow) and
+                 isWickOkBullish and isHighVolume
+                bullishSweepSignal := true
+                sessBullSweep := true
+                box.new(left=accEndBar, top=accLow,
+                     right=bar_index, bottom=low,
+                     bgcolor=color.new(color.green, 90),
+                     border_color=color.green,
+                     border_style=line.style_solid)
+
+        if high > accHigh and not sessBearSweep
+            if (not confirmCloseInside or close < accHigh) and
+                 isWickOkBearish and isHighVolume
+                bearishSweepSignal := true
+                sessBearSweep := true
+                box.new(left=accEndBar, top=high,
+                     right=bar_index, bottom=accHigh,
+                     bgcolor=color.new(color.red, 90),
+                     border_color=color.red,
+                     border_style=line.style_solid)
+
+bgcolor(not useAdaptive and isAccumSession ? colorAcc : na)
+bgcolor(not useAdaptive and isManipSession ? colorMan : na)
+bgcolor(not useAdaptive and isDistSession ? colorDis : na)
+
+plot(not useAdaptive and not isAccumSession and
+     (isManipSession or isDistSession) ? accHigh : na,
+     "Maximo Acc", color.blue, 1, plot.style_linebr)
+plot(not useAdaptive and not isAccumSession and
+     (isManipSession or isDistSession) ? accLow : na,
+     "Minimo Acc", color.blue, 1, plot.style_linebr)
+
+plotshape(bearishSweepSignal, title="Senal SELL (Barrido bajista)",
+     text="SELL", style=shape.triangledown,
+     location=location.abovebar, color=color.red,
+     textcolor=color.red, size=size.small)
+plotshape(bullishSweepSignal, title="Senal BUY (Barrido alcista)",
+     text="BUY", style=shape.triangleup,
+     location=location.belowbar, color=color.green,
+     textcolor=color.green, size=size.small)
+
+var box lastSlBox = na
+var box lastTpBox = na
+
+if showPositions and bullishSweepSignal
+    if not showHistoricalTrades
+        box.delete(lastSlBox)
+        box.delete(lastTpBox)
+
+    entryPrice = close
+    slDist = atr * atrSlMult
+    slPrice = entryPrice - slDist
+    tpPrice = entryPrice + (slDist * rrRatio)
+
+    lastSlBox := box.new(left=bar_index, top=entryPrice,
+         right=bar_index + boxWidth, bottom=slPrice,
+         bgcolor=color.new(color.red, 90),
+         border_color=color.new(color.red, 50),
+         text="SL: " + str.tostring(slPrice, format.mintick),
+         text_color=color.red, text_size=size.small,
+         text_valign=text.align_center, text_halign=text.align_right)
+
+    lastTpBox := box.new(left=bar_index, top=tpPrice,
+         right=bar_index + boxWidth, bottom=entryPrice,
+         bgcolor=color.new(color.green, 90),
+         border_color=color.new(color.green, 50),
+         text="TP: " + str.tostring(tpPrice, format.mintick),
+         text_color=color.green, text_size=size.small,
+         text_valign=text.align_center, text_halign=text.align_right)
+
+if showPositions and bearishSweepSignal
+    if not showHistoricalTrades
+        box.delete(lastSlBox)
+        box.delete(lastTpBox)
+
+    entryPrice = close
+    slDist = atr * atrSlMult
+    slPrice = entryPrice + slDist
+    tpPrice = entryPrice - (slDist * rrRatio)
+
+    lastSlBox := box.new(left=bar_index, top=slPrice,
+         right=bar_index + boxWidth, bottom=entryPrice,
+         bgcolor=color.new(color.red, 90),
+         border_color=color.new(color.red, 50),
+         text="SL: " + str.tostring(slPrice, format.mintick),
+         text_color=color.red, text_size=size.small,
+         text_valign=text.align_center, text_halign=text.align_right)
+
+    lastTpBox := box.new(left=bar_index, top=entryPrice,
+         right=bar_index + boxWidth, bottom=tpPrice,
+         bgcolor=color.new(color.green, 90),
+         border_color=color.new(color.green, 50),
+         text="TP: " + str.tostring(tpPrice, format.mintick),
+         text_color=color.green, text_size=size.small,
+         text_valign=text.align_center, text_halign=text.align_right)
+
+var box[] activeBullishFVGs = array.new_box()
+var box[] activeBearishFVGs = array.new_box()
+
+if array.size(activeBullishFVGs) > 20
+    box.delete(array.shift(activeBullishFVGs))
+if array.size(activeBearishFVGs) > 20
+    box.delete(array.shift(activeBearishFVGs))
+
+var int barsSinceBullSweep = 999
+var int barsSinceBearSweep = 999
+
+if bullishSweepSignal
+    barsSinceBullSweep := 0
+else
+    barsSinceBullSweep := barsSinceBullSweep + 1
+
+if bearishSweepSignal
+    barsSinceBearSweep := 0
+else
+    barsSinceBearSweep := barsSinceBearSweep + 1
+
+// Deteccion de FVG alcista
+if showFVG and barsSinceBullSweep < 15 and low[0] > high[2] and close[1] > open[1]
+    fvgBox = box.new(left=bar_index[2], top=low[0], right=bar_index,
+         bottom=high[2], bgcolor=fvgColorBuy,
+         border_color=color.new(color.green, 50),
+         border_style=line.style_solid)
+    array.push(activeBullishFVGs, fvgBox)
+    barsSinceBullSweep := 999
+
+// Deteccion de FVG bajista
+if showFVG and barsSinceBearSweep < 15 and high[0] < low[2] and close[1] < open[1]
+    fvgBox = box.new(left=bar_index[2], top=low[2], right=bar_index,
+         bottom=high[0], bgcolor=fvgColorSell,
+         border_color=color.new(color.red, 50),
+         border_style=line.style_solid)
+    array.push(activeBearishFVGs, fvgBox)
+    barsSinceBearSweep := 999
+
+// Actualizar y cerrar FVGs (mitigacion)
+if array.size(activeBullishFVGs) > 0
+    int idx = array.size(activeBullishFVGs) - 1
+    while idx >= 0
+        boxId = array.get(activeBullishFVGs, idx)
+        fvgBottom = box.get_bottom(boxId)
+        if low[0] < fvgBottom
+            box.delete(boxId)
+            array.remove(activeBullishFVGs, idx)
+        else
+            box.set_right(boxId, bar_index)
+        idx := idx - 1
+
+if array.size(activeBearishFVGs) > 0
+    int idx = array.size(activeBearishFVGs) - 1
+    while idx >= 0
+        boxId = array.get(activeBearishFVGs, idx)
+        fvgTop = box.get_top(boxId)
+        if high[0] > fvgTop
+            box.delete(boxId)
+            array.remove(activeBearishFVGs, idx)
+        else
+            box.set_right(boxId, bar_index)
+        idx := idx - 1

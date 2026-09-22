@@ -1,0 +1,291 @@
+//@version=6
+// ══════════════════════════════════════════════════════════════
+//  JUDAS SWING  ·  v1.1
+//  Creado por @nico66fx
+//
+//  Barrido de liquidez en apertura de sesion con confirmacion
+//  obligatoria de retorno al rango. La senal no nace en el
+//  barrido: nace cuando el precio vuelve dentro.
+// ══════════════════════════════════════════════════════════════
+
+indicator("Judas Swing · @nico66fx", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ─────────────────── ENTRADAS ───────────────────
+
+var string GA = "▸ Sesion A"
+onA  = input.bool(true, "Activa", group = GA)
+etqA = input.string("NY", "Etiqueta", group = GA)
+tzA  = input.string("America/New_York", "Huso", options = ["America/New_York", "Europe/London", "Europe/Madrid", "Asia/Tokyo", "Asia/Shanghai", "UTC"], group = GA)
+hhA  = input.int(9,  "Apertura", minval = 0, maxval = 23, group = GA, inline = "A")
+mmA  = input.int(30, ":",        minval = 0, maxval = 59, group = GA, inline = "A")
+
+var string GB = "▸ Sesion B"
+onB  = input.bool(true, "Activa", group = GB)
+etqB = input.string("LDN", "Etiqueta", group = GB)
+tzB  = input.string("Europe/London", "Huso", options = ["America/New_York", "Europe/London", "Europe/Madrid", "Asia/Tokyo", "Asia/Shanghai", "UTC"], group = GB)
+hhB  = input.int(8, "Apertura", minval = 0, maxval = 23, group = GB, inline = "B")
+mmB  = input.int(0, ":",        minval = 0, maxval = 59, group = GB, inline = "B")
+
+var string GR = "▸ Construccion del rango"
+anclaje  = input.string("Posterior", "Anclaje", options = ["Posterior", "Anterior"], group = GR, tooltip = "Posterior: mide los primeros X min tras la apertura.\nAnterior: mide los X min previos a la apertura.")
+duracion = input.int(30,  "Amplitud del rango (min)", minval = 5,  maxval = 600,  group = GR)
+vigencia = input.int(240, "Vigencia de la caza (min)", minval = 15, maxval = 1440, group = GR)
+margenAR = input.float(0.20, "Penetracion minima (× ATR)", minval = 0.0, maxval = 2.0, step = 0.05, group = GR, tooltip = "Cuanto debe rebasar el precio el extremo para contar como barrido.\n0 = una mecha de un tick vale. Sensato: 0.15 – 0.30.")
+
+var string GC = "▸ Confirmacion"
+exigeRetorno = input.bool(true, "Exigir retorno al rango", group = GC, tooltip = "OFF dispara en el barrido: muchas mas senales, muchisimo mas ruido.")
+techoVelas   = input.int(12, "Margen de velas para volver", minval = 1, maxval = 200, group = GC)
+exigeCuerpo  = input.bool(true, "Exigir cuerpo real en el retorno", group = GC)
+cuerpoAR     = input.float(0.35, "Cuerpo minimo (× ATR)", minval = 0.05, maxval = 3.0, step = 0.05, group = GC)
+anulaAR      = input.float(1.20, "Anular si extiende (× ATR)", minval = 0.2, maxval = 10.0, step = 0.10, group = GC, tooltip = "Si tras barrer el precio sigue empujando, no era trampa: era ruptura. Se descarta el ciclo.")
+
+var string GH = "▸ Higiene de datos"
+filtraPico = input.bool(true, "Ignorar velas corruptas", group = GH, tooltip = "Descarta velas cuyo rango sea desproporcionado frente al ATR. Evita que un tick malo del broker invente barridos y reviente la escala del grafico.")
+umbralPico = input.float(8.0, "Rango maximo tolerado (× ATR)", minval = 2.0, maxval = 50.0, step = 0.5, group = GH)
+
+var string GV = "▸ Aspecto"
+tonoLargo   = input.color(#26a69a, "Largo",  group = GV, inline = "c1")
+tonoCorto   = input.color(#ef5350, "Corto",  group = GV, inline = "c1")
+tonoMarco   = input.color(#5b7cfa, "Marco",  group = GV, inline = "c2")
+tonoRelleno = input.color(color.new(#5b7cfa, 89), "Relleno", group = GV, inline = "c2")
+tonoBarrido = input.color(color.new(#f5a623, 64), "Barrido", group = GV, inline = "c2")
+verPanel    = input.bool(true, "Panel de datos", group = GV)
+anclaPanel  = input.string("Sup. derecha", "Anclaje del panel", options = ["Sup. derecha", "Sup. izquierda", "Inf. derecha", "Inf. izquierda"], group = GV)
+
+// ─────────────────── UTILIDADES ───────────────────
+
+volatilidad = ta.atr(14)
+mideAntes   = anclaje == "Anterior"
+intradia    = timeframe.isintraday
+
+// Vela util: descarta ticks corruptos y velas de rango imposible
+velaSana = not filtraPico or na(volatilidad) or volatilidad == 0 or (high - low) <= umbralPico * volatilidad
+
+// Nada de repintado: el estado solo avanza sobre velas cerradas
+velaFirme = barstate.isconfirmed
+
+// Normaliza cualquier minuto a [0, 1440)
+ciclar(int x) => (x % 1440 + 1440) % 1440
+
+// Pertenencia con soporte para ventanas que cruzan medianoche
+abarca(int punto, int desde, int hasta) =>
+    d = ciclar(desde)
+    h = ciclar(hasta)
+    d <= h ? punto >= d and punto < h : punto >= d or punto < h
+
+marcar(float nivel, string texto, color fondo, bool arriba) =>
+    label.new(bar_index, nivel, texto, style = arriba ? label.style_label_down : label.style_label_up, color = fondo, textcolor = color.white, size = size.small)
+
+rotulo(string f) =>
+    switch f
+        "MIDE"  => "Midiendo"
+        "LISTA" => "Armada"
+        "ALTO"  => "Barrio techo"
+        "BAJO"  => "Barrio suelo"
+        "OK"    => "CONFIRMADA"
+        "NULA"  => "Descartada"
+        => "En espera"
+
+matiz(string f) =>
+    switch f
+        "OK"    => #26a69a
+        "ALTO"  => #f5a623
+        "BAJO"  => #f5a623
+        "LISTA" => #5b7cfa
+        => color.new(#787b86, 0)
+
+// ─────────────────── MODELO DE SESION ───────────────────
+
+type Sesion
+    string nombre
+    string huso
+    int    apertura
+    bool   viva
+    float  techo      = na
+    float  suelo      = na
+    int    velaOrigen = na
+    int    velaBarr   = na
+    string fase       = "ESPERA"
+    bool   mediaAntes = false
+    bool   cazabaAntes= false
+    int    ciclos     = 0
+    int    logrados   = 0
+    int    perdidos   = 0
+    bool   avisoLargo = false
+    bool   avisoCorto = false
+    box    marco      = na
+    line   guiaAlta   = na
+    line   guiaBaja   = na
+    label  sello      = na
+
+method correr(Sesion s) =>
+    s.avisoLargo := false
+    s.avisoCorto := false
+
+    if s.viva and intradia
+        reloj  = hour(time, s.huso) * 60 + minute(time, s.huso)
+        abre   = mideAntes ? s.apertura - duracion : s.apertura
+        cierra = mideAntes ? s.apertura : s.apertura + duracion
+        expira = cierra + vigencia
+
+        midiendo = abarca(reloj, abre, cierra)
+        cazando  = abarca(reloj, cierra, expira)
+
+        estreno = midiendo and not s.mediaAntes
+        finCaza = s.cazabaAntes and not cazando
+        s.mediaAntes  := midiendo
+        s.cazabaAntes := cazando
+
+        holgura = margenAR * volatilidad
+
+        // ── Cierre honesto: la caza expiro sin resolver ──
+        if finCaza
+            if s.fase == "ALTO" or s.fase == "BAJO"
+                s.perdidos += 1
+            if s.fase != "OK"
+                s.fase := "NULA"
+
+        // ── Fase 1: levantar el rango ──
+        if estreno and velaSana
+            s.techo      := high
+            s.suelo      := low
+            s.velaOrigen := bar_index
+            s.velaBarr   := na
+            s.fase       := "MIDE"
+            s.marco    := box.new(bar_index, high, bar_index, low, border_color = tonoMarco, border_width = 1, bgcolor = tonoRelleno)
+            s.guiaAlta := line.new(bar_index, high, bar_index + 1, high, color = tonoMarco, style = line.style_dotted)
+            s.guiaBaja := line.new(bar_index, low,  bar_index + 1, low,  color = tonoMarco, style = line.style_dotted)
+            s.sello    := label.new(bar_index, high, s.nombre, style = label.style_label_down, color = tonoMarco, textcolor = color.white, size = size.tiny)
+        else if midiendo and velaSana and s.fase == "MIDE"
+            s.techo := math.max(s.techo, high)
+            s.suelo := math.min(s.suelo, low)
+
+        // El dibujo se reconstruye cada vela: no puede quedar descolocado
+        if s.fase == "MIDE" and not na(s.marco)
+            box.set_top(s.marco, s.techo)
+            box.set_bottom(s.marco, s.suelo)
+            box.set_right(s.marco, bar_index)
+            line.set_xy1(s.guiaAlta, s.velaOrigen, s.techo)
+            line.set_xy2(s.guiaAlta, bar_index + 1, s.techo)
+            line.set_xy1(s.guiaBaja, s.velaOrigen, s.suelo)
+            line.set_xy2(s.guiaBaja, bar_index + 1, s.suelo)
+            label.set_xy(s.sello, s.velaOrigen, s.techo)
+
+        // ── Fase 2: armar la caza ──
+        if cazando and s.fase == "MIDE" and not na(s.techo) and s.techo > s.suelo
+            s.fase := "LISTA"
+
+        vigente = s.fase == "LISTA" or s.fase == "ALTO" or s.fase == "BAJO"
+        if cazando and vigente and not na(s.guiaAlta)
+            line.set_x2(s.guiaAlta, bar_index + 1)
+            line.set_x2(s.guiaBaja, bar_index + 1)
+
+        // ── Fase 3: registrar el barrido ──
+        if cazando and velaFirme and velaSana and s.fase == "LISTA"
+            porArriba = high > s.techo + holgura
+            porAbajo  = low  < s.suelo - holgura
+
+            if porArriba and porAbajo
+                // una sola vela toca los dos extremos: el orden intravela es desconocido
+                s.fase     := "NULA"
+                s.perdidos += 1
+                marcar(high, "?", color.new(#787b86, 25), true)
+            else if porArriba or porAbajo
+                s.fase     := porArriba ? "ALTO" : "BAJO"
+                s.velaBarr := bar_index
+                s.ciclos   += 1
+                box.new(bar_index, porArriba ? high : s.suelo, bar_index + 1, porArriba ? s.techo : low, border_color = color.new(color.white, 100), bgcolor = tonoBarrido)
+
+                if not exigeRetorno
+                    s.fase     := "OK"
+                    s.logrados += 1
+                    if porArriba
+                        s.avisoCorto := true
+                    else
+                        s.avisoLargo := true
+
+        // ── Fase 4: resolver ──
+        else if cazando and velaFirme and velaSana and (s.fase == "ALTO" or s.fase == "BAJO") and bar_index > s.velaBarr
+            arriba  = s.fase == "ALTO"
+            borde   = arriba ? s.techo : s.suelo
+            desvio  = arriba ? high - borde : borde - low
+            regreso = arriba ? close < borde : close > borde
+            impulso = not exigeCuerpo or (math.abs(close - open) >= cuerpoAR * volatilidad and (arriba ? close < open : close > open))
+
+            if desvio > anulaAR * volatilidad
+                s.fase     := "NULA"
+                s.perdidos += 1
+            else if regreso and impulso
+                s.fase     := "OK"
+                s.logrados += 1
+                if arriba
+                    s.avisoCorto := true
+                else
+                    s.avisoLargo := true
+                marcar(arriba ? high : low, s.nombre + (arriba ? " ▼" : " ▲"), arriba ? tonoCorto : tonoLargo, arriba)
+            else if bar_index - s.velaBarr >= techoVelas
+                s.fase     := "NULA"
+                s.perdidos += 1
+    s
+
+// ─────────────────── INSTANCIAS ───────────────────
+
+var Sesion sA = Sesion.new(nombre = etqA, huso = tzA, apertura = ciclar(hhA * 60 + mmA), viva = onA)
+var Sesion sB = Sesion.new(nombre = etqB, huso = tzB, apertura = ciclar(hhB * 60 + mmB), viva = onB)
+var array<Sesion> banco = array.from(sA, sB)
+
+sA.correr()
+sB.correr()
+
+largo = sA.avisoLargo or sB.avisoLargo
+corto = sA.avisoCorto or sB.avisoCorto
+
+plotshape(largo, "Largo", shape.triangleup,   location.belowbar, tonoLargo, size = size.tiny, display = display.pane)
+plotshape(corto, "Corto", shape.triangledown, location.abovebar, tonoCorto, size = size.tiny, display = display.pane)
+
+// ─────────────────── AVISOS ───────────────────
+
+alertcondition(sA.avisoLargo, "A · Largo", "Judas Swing @nico66fx | Sesion A: suelo barrido y recuperado. Sesgo LARGO")
+alertcondition(sA.avisoCorto, "A · Corto", "Judas Swing @nico66fx | Sesion A: techo barrido y rechazado. Sesgo CORTO")
+alertcondition(sB.avisoLargo, "B · Largo", "Judas Swing @nico66fx | Sesion B: suelo barrido y recuperado. Sesgo LARGO")
+alertcondition(sB.avisoCorto, "B · Corto", "Judas Swing @nico66fx | Sesion B: techo barrido y rechazado. Sesgo CORTO")
+alertcondition(largo, "Cualquiera · Largo", "Judas Swing @nico66fx: sesgo LARGO confirmado")
+alertcondition(corto, "Cualquiera · Corto", "Judas Swing @nico66fx: sesgo CORTO confirmado")
+
+// ─────────────────── PANEL ───────────────────
+
+sitio = switch anclaPanel
+    "Sup. derecha"    => position.top_right
+    "Sup. izquierda"  => position.top_left
+    "Inf. derecha"    => position.bottom_right
+    => position.bottom_left
+
+var color capa   = color.new(#131722, 8)
+var color lienzo = color.new(#1b2434, 12)
+var color tinta  = color.new(#d1d4dc, 0)
+var color gris   = color.new(#787b86, 0)
+
+ratio(int a, int b) => b == 0 ? "—" : str.tostring(math.round(a * 100.0 / b)) + "%"
+
+var table cuadro = table.new(sitio, 5, 4, bgcolor = lienzo, frame_width = 1, frame_color = color.new(color.gray, 62), border_width = 1, border_color = color.new(color.gray, 82))
+
+if barstate.islast and verPanel
+    table.cell(cuadro, 0, 0, "JUDAS SWING", text_color = color.white, text_size = size.small, bgcolor = capa)
+    table.cell(cuadro, 1, 0, "Fase",     text_color = gris, text_size = size.tiny, bgcolor = capa)
+    table.cell(cuadro, 2, 0, "Ciclos",   text_color = gris, text_size = size.tiny, bgcolor = capa)
+    table.cell(cuadro, 3, 0, "Logrados", text_color = gris, text_size = size.tiny, bgcolor = capa)
+    table.cell(cuadro, 4, 0, "Ratio",    text_color = gris, text_size = size.tiny, bgcolor = capa)
+
+    for i = 0 to banco.size() - 1
+        s = banco.get(i)
+        f = i + 1
+        activa = s.viva and intradia
+        table.cell(cuadro, 0, f, s.nombre + "  " + str.format("{0,number,00}:{1,number,00}", math.floor(s.apertura / 60), s.apertura % 60), text_color = tinta, text_size = size.tiny)
+        table.cell(cuadro, 1, f, activa ? rotulo(s.fase) : (s.viva ? "—" : "Apagada"), text_color = activa ? matiz(s.fase) : gris, text_size = size.tiny)
+        table.cell(cuadro, 2, f, str.tostring(s.ciclos),   text_color = tinta, text_size = size.tiny)
+        table.cell(cuadro, 3, f, str.tostring(s.logrados), text_color = tinta, text_size = size.tiny)
+        table.cell(cuadro, 4, f, ratio(s.logrados, s.ciclos), text_color = tinta, text_size = size.tiny)
+
+    pie = not intradia ? "⚠ Solo intradia — usa M1 / M5 / M15" : (mideAntes ? "Anterior " : "Posterior ") + str.tostring(duracion) + "m  ·  " + str.tostring(margenAR) + " ATR  ·  " + (exigeRetorno ? "con retorno" : "SIN retorno")
+    table.cell(cuadro, 0, 3, pie, text_color = intradia ? gris : #ef5350, text_size = size.tiny, bgcolor = capa)
+    table.merge_cells(cuadro, 0, 3, 4, 3)

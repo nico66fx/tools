@@ -1,0 +1,389 @@
+//@version=6
+// =============================================================================
+//  IFVG — Inversion Fair Value Gap
+//  Versión 1.1 · Autor: nico66fx
+//  Marca los huecos de precio que el mercado ha atravesado y se han dado la
+//  vuelta, convirtiéndose en zonas de soporte y de resistencia.
+//
+//  No da señales de entrada. No calcula stops ni objetivos.
+//  No repinta: todo se confirma con la vela cerrada.
+// =============================================================================
+
+indicator(title            = "IFVG [nico66fx]",
+          shorttitle       = "IFVG",
+          overlay          = true,
+          max_boxes_count  = 500,
+          max_labels_count = 500,
+          max_bars_back    = 1000)   // las cajas arrancan hasta 500 velas atrás
+
+
+// =============================================================================
+//  INPUTS  (siete, sin grupos, para que quepan sin scroll)
+// =============================================================================
+
+float tamMinimo = input.float(0.5, "Tamaño mínimo del hueco",
+     minval = 0.0, maxval = 3.0, step = 0.05,
+     tooltip = "Sube el valor para ver solo los huecos grandes y bájalo para ver muchos más. Con 0 aparecen todos.")
+
+int velasRespeto = input.int(10, "Velas para confirmar que aguanta",
+     minval = 1, maxval = 200,
+     tooltip = "Cuántas velas tiene que resistir la zona después de que el precio la toque para darla por buena.")
+
+int zonasPorLado = input.int(3, "Zonas a cada lado del precio",
+     minval = 1, maxval = 10,
+     tooltip = "Cuántas zonas se dibujan por encima y por debajo del precio. Siempre se eligen las más cercanas.")
+
+bool ocultarUsadas = input.bool(true, "Ocultar zonas ya usadas",
+     tooltip = "Quita del gráfico el rastro de las zonas que el precio ya probó o atravesó. Desactívalo para ver el histórico en gris.")
+
+color colorAlcista = input.color(#3b82f6, "Soporte",
+     tooltip = "Color de las zonas que sostienen el precio desde abajo.")
+
+color colorBajista = input.color(#f97316, "Resistencia",
+     tooltip = "Color de las zonas que frenan el precio desde arriba.")
+
+bool mostrarPanel = input.bool(true, "Mostrar panel",
+     tooltip = "Muestra u oculta el recuadro de información de la esquina.")
+
+
+// =============================================================================
+//  TIPO Y ESTADO
+// =============================================================================
+
+// --- Valores fijos (no son inputs para no cargar la ventana de ajustes) ------
+int   LONGITUD_ATR     = 200     // referencia de tamaño para el filtro de huecos.
+                                 // Largo a propósito: así "hueco grande" significa lo
+                                 // mismo en todo el histórico y el porcentaje del panel
+                                 // no mezcla criterios entre tramos tranquilos y volátiles.
+                                 // Es lo que usan las implementaciones de referencia
+                                 // (LuxAlgo 0.25xATR200, AlgoAlpha 0.3xATR150).
+int   VIDA_MAXIMA      = 500     // velas que vive una zona antes de descartarse
+                                 // (si lo subes, sube también max_bars_back arriba)
+int   MAX_ZONAS_VIVAS  = 300     // tope de zonas en memoria (rendimiento)
+int   MAX_CAJAS_USADAS = 60      // tope del rastro gris en el gráfico
+int   MINIMO_DATOS     = 20      // por debajo de esto, el porcentaje no es fiable
+color COLOR_USADA      = #6b7280 // gris de las zonas ya gastadas
+int   TRANSP_ACTIVA    = 85
+int   TRANSP_USADA     = 92
+
+// Colores del panel
+color PANEL_FONDO    = color.new(#0f172a, 15)
+color PANEL_ACENTO   = #06b6d4
+color PANEL_TEXTO    = #e2e8f0
+color PANEL_ETIQUETA = #94a3b8
+color PANEL_AVISO    = #f59e0b
+
+// Una zona de precio con todo su ciclo de vida.
+//
+//  fvg     · hueco detectado, todavía no se ha invertido (no se dibuja)
+//  ifvg    · el hueco se invirtió, pero el precio sigue pegado a la zona
+//  armada  · el precio se separó de la zona: ya se puede hablar de retest
+//  tocada  · el precio volvió y está probando la zona ahora mismo
+//  Al resolverse la zona muere: cuenta como respetada o como rota.
+type Zona
+    float  top                     // borde superior
+    float  bottom                  // borde inferior
+    int    barFormacion            // vela donde se detectó el hueco
+    int    barInversion            // vela donde el hueco se dio la vuelta
+    int    barToque                // vela del retest
+    bool   huecoAlcista = true     // dirección del hueco original
+    bool   esAlcista    = true     // dirección de la zona resultante (true = soporte)
+    string estado       = "fvg"
+
+// --- Colecciones -------------------------------------------------------------
+var array<Zona>  zonas            = array.new<Zona>()   // zonas vivas en memoria
+var array<box>   cajasActivas     = array.new<box>()    // dibujo de las zonas cercanas
+var array<label> etiquetasActivas = array.new<label>()
+var array<box>   cajasUsadas      = array.new<box>()    // rastro gris del histórico
+
+// --- Contadores de la estadística -------------------------------------------
+var int contRespetadas = 0
+var int contRotas      = 0
+
+// --- Serie de referencia (se calcula siempre, nunca dentro de un if) ---------
+float atr = ta.atr(LONGITUD_ATR)
+
+// --- Unidad de distancia del símbolo ----------------------------------------
+// Los pares de divisas con 3 o 5 decimales cotizan en décimas de pip.
+int   decimalesSimbolo = int(math.round(-math.log10(syminfo.mintick)))
+bool  esForex          = syminfo.type == "forex"
+float valorPip         = (decimalesSimbolo == 3 or decimalesSimbolo == 5) ? syminfo.mintick * 10 : syminfo.mintick
+
+// --- Funciones auxiliares ----------------------------------------------------
+// (Pine obliga a declarar las funciones antes de usarlas.)
+
+// Deja en el gráfico el rastro gris de una zona que ya se ha gastado.
+marcarUsada(Zona z) =>
+    array.push(cajasUsadas, box.new(z.barInversion, z.top, bar_index, z.bottom,
+         border_color = color.new(COLOR_USADA, 40), border_width = 1,
+         bgcolor = color.new(COLOR_USADA, TRANSP_USADA)))
+    while array.size(cajasUsadas) > MAX_CAJAS_USADAS
+        box.delete(array.shift(cajasUsadas))
+
+// Distancia del precio a un nivel, en pips (forex) o en puntos (el resto).
+textoDistancia(float nivel) =>
+    float separacion = math.abs(close - nivel)
+    string resultado = str.tostring(separacion, format.mintick) + " pts"
+    if esForex
+        resultado := str.tostring(separacion / valorPip, "#") + " pips"
+    resultado
+
+
+// =============================================================================
+//  DETECCIÓN  +  CICLO DE VIDA
+//  Todo ocurre dentro de barstate.isconfirmed: una sola pasada por vela, en su
+//  cierre. Eso es lo que garantiza que el indicador no repinte.
+// =============================================================================
+
+// Eventos de esta vela (alimentan las alertas).
+bool nuevoSoporte     = false
+bool nuevaResistencia = false
+bool nuevoToque       = false
+
+if barstate.isconfirmed
+
+    // -------------------------------------------------------------------------
+    //  DETECCIÓN — hueco sobre las tres últimas velas cerradas
+    //  Vela actual [0], vela del impulso [1], vela de origen [2].
+    //  La vela del impulso no define ningún borde.
+    // -------------------------------------------------------------------------
+    if not na(atr)
+        bool huecoAlcista = low  > high[2]   // el mínimo de ahora queda por encima del máximo de hace dos velas
+        bool huecoBajista = high < low[2]    // el máximo de ahora queda por debajo del mínimo de hace dos velas
+
+        if huecoAlcista or huecoBajista
+            float nuevoTop    = huecoAlcista ? low     : low[2]
+            float nuevoBottom = huecoAlcista ? high[2] : high
+
+            // Filtro de tamaño: el hueco tiene que medir lo suficiente.
+            if (nuevoTop - nuevoBottom) >= tamMinimo * atr
+                array.push(zonas, Zona.new(
+                     top          = nuevoTop,
+                     bottom       = nuevoBottom,
+                     barFormacion = bar_index,
+                     huecoAlcista = huecoAlcista,
+                     esAlcista    = not huecoAlcista,   // la zona resultante va al revés que el hueco
+                     estado       = "fvg"))
+
+                // Tope de memoria: se descartan las más antiguas.
+                while array.size(zonas) > MAX_ZONAS_VIVAS
+                    array.shift(zonas)
+
+    // -------------------------------------------------------------------------
+    //  CICLO DE VIDA — se recorre hacia atrás para poder eliminar sin problemas
+    // -------------------------------------------------------------------------
+    if array.size(zonas) > 0
+        for indice = array.size(zonas) - 1 to 0
+            Zona z = array.get(zonas, indice)
+            bool eliminar = false
+
+            if z.estado == "fvg"
+                // ---------------------------------------------------------
+                //  Hueco sin invertir. Se convierte en zona cuando una vela
+                //  CIERRA completamente al otro lado. Nunca por mecha.
+                // ---------------------------------------------------------
+                bool seInvierte = z.huecoAlcista ? close < z.bottom : close > z.top
+
+                if seInvierte
+                    z.estado       := "ifvg"
+                    z.barInversion := bar_index
+                    if z.esAlcista
+                        nuevoSoporte := true
+                    else
+                        nuevaResistencia := true
+
+                else if bar_index - z.barFormacion > VIDA_MAXIMA
+                    eliminar := true    // hueco que nunca llegó a invertirse
+
+            else
+                // ---------------------------------------------------------
+                //  Zona ya invertida.
+                //  ifvg -> armada -> tocada -> respetada / rota
+                // ---------------------------------------------------------
+                bool rompe = z.esAlcista ? close < z.bottom : close > z.top
+
+                if rompe
+                    // --- Rotura: la zona muere ---
+                    // Solo cuenta si el precio había vuelto a probarla de verdad.
+                    if z.estado == "tocada"
+                        contRotas += 1
+                    if not ocultarUsadas and z.estado != "ifvg"
+                        marcarUsada(z)
+                    eliminar := true
+
+                else if z.estado == "ifvg"
+                    // --- Armado: el precio tiene que separarse de la zona ---
+                    // Hasta que una vela entera no queda fuera, seguimos en la
+                    // misma secuencia de la inversión y no hay retest que valga.
+                    bool velaFuera = z.esAlcista ? low > z.top : high < z.bottom
+                    if velaFuera
+                        z.estado := "armada"
+
+                else if z.estado == "armada"
+                    // --- Retest: el precio vuelve y entra en la zona ---
+                    if low <= z.top and high >= z.bottom
+                        z.barToque := bar_index
+                        z.estado   := "tocada"
+                        nuevoToque := true
+
+                else if bar_index - z.barToque >= velasRespeto
+                    // --- Respetada: aguantó las velas pedidas. Cumplió y se retira ---
+                    contRespetadas += 1
+                    if not ocultarUsadas
+                        marcarUsada(z)
+                    eliminar := true
+
+                // --- Muerte por antigüedad: no toca la estadística ---
+                if not eliminar and bar_index - z.barInversion > VIDA_MAXIMA
+                    eliminar := true
+
+            if eliminar
+                array.remove(zonas, indice)
+
+
+// =============================================================================
+//  DIBUJO
+//  Solo se dibujan las zonas vivas más cercanas al precio. El conjunto se
+//  rehace en la última vela: los objetos gráficos solo conservan su estado
+//  final, así que es equivalente a redibujar en cada vela y muchísimo más barato.
+// =============================================================================
+
+// Dibuja las 'zonasPorLado' zonas más próximas de una de las dos listas.
+dibujarCercanas(array<int> indices, array<float> distancias) =>
+    if array.size(indices) > 0
+        array<int> orden = array.sort_indices(distancias, order.ascending)
+        int cuantas = math.min(zonasPorLado, array.size(orden))
+        for k = 0 to cuantas - 1
+            Zona  z         = array.get(zonas, array.get(indices, array.get(orden, k)))
+            color colorZona = z.esAlcista ? colorAlcista : colorBajista
+            // Borde grueso mientras el precio está probando la zona.
+            int   grosor    = z.estado == "tocada" ? 2 : 1
+            array.push(cajasActivas, box.new(z.barInversion, z.top, bar_index, z.bottom,
+                 border_color = colorZona, border_width = grosor,
+                 bgcolor = color.new(colorZona, TRANSP_ACTIVA), extend = extend.right))
+            array.push(etiquetasActivas, label.new(bar_index + 3, (z.top + z.bottom) / 2,
+                 z.esAlcista ? "IFVG↑" : "IFVG↓",
+                 style = label.style_none, textcolor = colorZona, size = size.tiny))
+
+if barstate.islast
+    // Borrar el dibujo del refresco anterior.
+    while array.size(cajasActivas) > 0
+        box.delete(array.pop(cajasActivas))
+    while array.size(etiquetasActivas) > 0
+        label.delete(array.pop(etiquetasActivas))
+
+    // Repartir las zonas vivas en las que quedan por encima y por debajo del precio.
+    // Una zona que contiene al precio tiene distancia 0, así que siempre se dibuja.
+    array<int>   indiceArriba = array.new<int>()
+    array<float> distArriba   = array.new<float>()
+    array<int>   indiceAbajo  = array.new<int>()
+    array<float> distAbajo    = array.new<float>()
+
+    if array.size(zonas) > 0
+        for indiceZona = 0 to array.size(zonas) - 1
+            Zona zonaViva = array.get(zonas, indiceZona)
+            if zonaViva.estado != "fvg"       // los huecos sin invertir no se dibujan
+                float centro = (zonaViva.top + zonaViva.bottom) / 2
+                if centro >= close
+                    array.push(indiceArriba, indiceZona)
+                    array.push(distArriba, math.max(0, zonaViva.bottom - close))
+                else
+                    array.push(indiceAbajo, indiceZona)
+                    array.push(distAbajo, math.max(0, close - zonaViva.top))
+
+    dibujarCercanas(indiceArriba, distArriba)
+    dibujarCercanas(indiceAbajo,  distAbajo)
+
+
+// =============================================================================
+//  PANEL  (seis líneas, esquina superior derecha)
+// =============================================================================
+
+var table panel = na
+
+if mostrarPanel and barstate.islast
+    if na(panel)
+        panel := table.new(position.top_right, 2, 6,
+             bgcolor = PANEL_FONDO, border_width = 1,
+             border_color = color.new(#334155, 40),
+             frame_width = 1, frame_color = color.new(#334155, 40))
+
+    int   zonasArriba      = 0
+    int   zonasAbajo       = 0
+    float nivelSoporte     = na
+    float nivelResistencia = na
+    bool  precioDentro     = false
+
+    if array.size(zonas) > 0
+        for indicePanel = 0 to array.size(zonas) - 1
+            Zona zonaPanel = array.get(zonas, indicePanel)
+            if zonaPanel.estado != "fvg"
+                if close >= zonaPanel.bottom and close <= zonaPanel.top
+                    precioDentro := true
+                else if zonaPanel.bottom > close
+                    zonasArriba += 1
+                else
+                    zonasAbajo += 1
+                // Soporte más cercano: zona alcista con su techo por debajo del precio.
+                if zonaPanel.esAlcista and zonaPanel.top <= close and (na(nivelSoporte) or zonaPanel.top > nivelSoporte)
+                    nivelSoporte := zonaPanel.top
+                // Resistencia más cercana: zona bajista con su suelo por encima del precio.
+                if not zonaPanel.esAlcista and zonaPanel.bottom >= close and (na(nivelResistencia) or zonaPanel.bottom < nivelResistencia)
+                    nivelResistencia := zonaPanel.bottom
+
+    int   totalDatos = contRespetadas + contRotas
+    bool  pocosDatos = totalDatos < MINIMO_DATOS
+    color colorFila  = pocosDatos ? PANEL_ETIQUETA : PANEL_TEXTO
+
+    string textoRespetadas = "—"
+    if totalDatos > 0
+        textoRespetadas := str.tostring(contRespetadas * 100.0 / totalDatos, "#") + "%  (" + str.tostring(totalDatos) + ")"
+        if pocosDatos
+            textoRespetadas := textoRespetadas + "  pocos datos"
+
+    // --- Fila 0: cabecera ---
+    table.cell(panel, 0, 0, "IFVG · nico66fx", text_color = PANEL_ACENTO,
+         text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1e293b, 30))
+    table.cell(panel, 1, 0, "", bgcolor = color.new(#1e293b, 30))
+
+    // --- Fila 1: zonas vivas por encima y por debajo del precio ---
+    table.cell(panel, 0, 1, "Zonas activas", text_color = PANEL_ETIQUETA,
+         text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 1, str.tostring(zonasArriba) + "↑   " + str.tostring(zonasAbajo) + "↓",
+         text_color = PANEL_TEXTO, text_size = size.small, text_halign = text.align_right)
+
+    // --- Fila 2: soporte más cercano ---
+    table.cell(panel, 0, 2, "Soporte más cercano", text_color = PANEL_ETIQUETA,
+         text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 2, na(nivelSoporte) ? "—" : str.tostring(nivelSoporte, format.mintick) + "   (" + textoDistancia(nivelSoporte) + ")",
+         text_color = na(nivelSoporte) ? PANEL_ETIQUETA : colorAlcista, text_size = size.small, text_halign = text.align_right)
+
+    // --- Fila 3: resistencia más cercana ---
+    table.cell(panel, 0, 3, "Resistencia cercana", text_color = PANEL_ETIQUETA,
+         text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 3, na(nivelResistencia) ? "—" : str.tostring(nivelResistencia, format.mintick) + "   (" + textoDistancia(nivelResistencia) + ")",
+         text_color = na(nivelResistencia) ? PANEL_ETIQUETA : colorBajista, text_size = size.small, text_halign = text.align_right)
+
+    // --- Fila 4: ¿el precio está dentro de una zona? ---
+    table.cell(panel, 0, 4, "Precio en zona", text_color = PANEL_ETIQUETA,
+         text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 4, precioDentro ? "SÍ" : "NO",
+         text_color = precioDentro ? PANEL_AVISO : PANEL_TEXTO, text_size = size.small, text_halign = text.align_right)
+
+    // --- Fila 5: porcentaje de zonas que el precio respetó ---
+    table.cell(panel, 0, 5, "Zonas respetadas", text_color = PANEL_ETIQUETA,
+         text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 5, textoRespetadas,
+         text_color = colorFila, text_size = size.small, text_halign = text.align_right)
+
+
+// =============================================================================
+//  ALERTAS  (ninguna insinúa una entrada)
+// =============================================================================
+
+alertcondition(nuevoSoporte, "IFVG alcista confirmado",
+     "Se ha formado un soporte IFVG en {{ticker}} {{interval}}.")
+alertcondition(nuevaResistencia, "IFVG bajista confirmado",
+     "Se ha formado una resistencia IFVG en {{ticker}} {{interval}}.")
+alertcondition(nuevoToque, "Precio entra en un IFVG",
+     "El precio ha vuelto a una zona IFVG activa en {{ticker}} {{interval}}.")

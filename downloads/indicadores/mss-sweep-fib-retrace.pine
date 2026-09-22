@@ -1,0 +1,657 @@
+//@version=6
+// =============================================================================
+//  MSS Sweep Fib Retrace   ·   by @nico66fx
+// -----------------------------------------------------------------------------
+//  Secuencia replicada (100% determinista, sin repintado ni lookahead):
+//
+//      Swing/Pivot  ->  Liquidity Sweep  ->  MSS/CHoCH (+ momentum)
+//                   ->  Fib 50% del leg  ->  Entry (tap del 50%)
+//                   ->  SL/TP por ATR
+//
+//  Indicador autocontenido: no depende de ningun script, libreria ni recurso
+//  externo. Todo el calculo se realiza sobre barras cerradas.
+//
+//  ARQUITECTURA
+//    detectSwing()         -> pivots confirmados (ta.pivothigh / ta.pivotlow)
+//    detectSweep()         -> barrida + rechazo de un swing previo
+//    checkMacroTrend()     -> filtro EMA macro
+//    checkMomentum()       -> N velas de momentum consecutivas
+//    detectMSS()           -> ruptura estructural por cierre + momentum
+//    calculateFib50()      -> 50% del leg  (sweep extreme -> MSS point)
+//    checkEntry()          -> tap del nivel 50%
+//    calculateRiskLevels() -> SL/TP por ATR, congelados en la entrada
+//    (bloque resetSetup)   -> limpieza de estado
+//    + maquina de estados central: IDLE -> SWEEP -> MSS -> ENTRY -> IDLE
+//    + tracker de operaciones (zonas SL/TP + resolucion) y panel de estadisticas
+// =============================================================================
+
+indicator(title     = "MSS Sweep Fib Retrace by @nico66fx",
+          shorttitle= "MSS SFR",
+          overlay   = true,
+          max_lines_count  = 500,
+          max_labels_count = 500,
+          max_boxes_count  = 500)
+
+// =============================================================================
+//  1. INPUTS
+// =============================================================================
+const string G_STRUCT = "Structure"
+const string G_TREND  = "Macro Trend"
+const string G_RISK   = "Risk (ATR)"
+const string G_VIS    = "Visuals"
+const string G_STATS  = "Statistics"
+
+pivotLeftBars           = input.int(5,   "Pivot Left Bars",                    minval = 1,             group = G_STRUCT, tooltip = "Barras a la izquierda para validar un pivot.")
+pivotRightBars          = input.int(5,   "Pivot Right Bars",                   minval = 1,             group = G_STRUCT, tooltip = "Barras a la derecha para confirmar un pivot. Es el retardo natural e inevitable del indicador.")
+requiredMomentumCandles = input.int(3,   "Required Momentum Candles for MSS",  minval = 1, maxval = 20, group = G_STRUCT, tooltip = "Velas consecutivas en la direccion del MSS que deben acompanar a la ruptura estructural.")
+setupExpiryBars         = input.int(50,  "Setup Expiry (bars, 0 = disabled)",  minval = 0,             group = G_STRUCT, tooltip = "Barras maximas que puede vivir cada fase del setup (esperando MSS / esperando el 50%). 0 desactiva la expiracion.")
+
+useMacroTrendFilter     = input.bool(true, "Use Overall Macro Trend Filter",   group = G_TREND)
+macroTrendEMAPeriod     = input.int(200,   "Macro Trend EMA Period", minval = 1, group = G_TREND)
+
+atrPeriod               = input.int(14,   "ATR Period",                 minval = 1,               group = G_RISK)
+stopLossATRMultiplier   = input.float(1.0, "Stop Loss ATR Multiplier",   minval = 0.0, step = 0.1, group = G_RISK)
+takeProfitATRMultiplier = input.float(2.0, "Take Profit ATR Multiplier", minval = 0.0, step = 0.1, group = G_RISK)
+
+showDrawingsAndLabels   = input.bool(true,  "Show Drawings and Labels", group = G_VIS)
+showRiskRewardBoxes     = input.bool(true,  "Show Risk/Reward Boxes",   group = G_VIS)
+slBoxTransparency       = input.int(85, "SL Box Transparency", minval = 0, maxval = 100, group = G_VIS)
+tpBoxTransparency       = input.int(85, "TP Box Transparency", minval = 0, maxval = 100, group = G_VIS)
+keepHistoricalBoxes     = input.bool(true,  "Keep Historical Trade Boxes", group = G_VIS, tooltip = "Si se desactiva, solo se mantienen las zonas de las operaciones ACTIVAS; las cerradas se borran (se conserva la etiqueta de resultado).")
+debugMode               = input.bool(false, "Debug Mode",               group = G_VIS)
+
+showStatsPanel          = input.bool(true, "Show Statistics Panel",  group = G_STATS)
+statsLookbackTrades     = input.int(15, "Statistics Lookback Trades", minval = 1, group = G_STATS, tooltip = "Numero de operaciones recientes usadas en la fila LAST N R del panel.")
+
+// =============================================================================
+//  2. CONSTANTES
+// =============================================================================
+// --- Estados de la maquina de estados -----------------------------------------
+//  STATE_IDLE  : sin setup vivo. Se buscan sweeps.
+//  STATE_SWEEP : sweep detectado -> WAITING_FOR_MSS.
+//  STATE_MSS   : MSS confirmado  -> WAITING_FOR_50_RETRACE (nivel 50% activo).
+//  STATE_ENTRY : entrada disparada en esta barra (COMPLETED). Se resetea en la
+//                barra siguiente, de modo que un setup NUNCA produce 2 entradas.
+const int STATE_IDLE  = 0
+const int STATE_SWEEP = 1
+const int STATE_MSS   = 2
+const int STATE_ENTRY = 3
+
+const int PANEL_COLS = 10       // columnas del panel = nº maximo de trades en la fila LAST TRADES
+
+const color COL_BULL = #26a69a
+const color COL_BEAR = #ef5350
+const color COL_FIB  = #ffb300
+const color COL_TXT  = #ffffff
+
+// =============================================================================
+//  3. SERIES BASE
+// =============================================================================
+float atrValue = ta.atr(atrPeriod)
+float macroEma = ta.ema(close, macroTrendEMAPeriod)
+
+// =============================================================================
+//  4. FUNCIONES (puras: no mutan estado global)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// detectSwing()
+//   Pivots estandar de Pine. ta.pivothigh/ta.pivotlow devuelven un valor NO-na
+//   unicamente en la barra en la que el pivot queda CONFIRMADO, y ese valor
+//   pertenece a la barra (bar_index - pivotRightBars).
+//   -> No hay lookahead: el nivel solo se conoce tras las pivotRightBars.
+// -----------------------------------------------------------------------------
+detectSwing() =>
+    [ta.pivothigh(high, pivotLeftBars, pivotRightBars), ta.pivotlow(low, pivotLeftBars, pivotRightBars)]
+
+// -----------------------------------------------------------------------------
+// detectSweep()
+//   Sweep bajista (raid de liquidez sobre maximos):
+//       1) el precio supera el previous swing high          -> high  > swingHigh
+//       2) registra un nuevo maximo por encima del swing    -> ese mismo high
+//       3) no mantiene la ruptura / rechaza el nivel        -> close < swingHigh
+//   Sweep alcista: simetrico sobre el previous swing low.
+//
+//   Devuelve:  -1 = sweep bajista (raid de maximos, setup CORTO)
+//              +1 = sweep alcista (raid de minimos, setup LARGO)
+//               0 = sin sweep
+//   Si una misma barra barre ambos lados (outside bar), gana la excursion mayor.
+// -----------------------------------------------------------------------------
+detectSweep(float swingHigh, float swingLow) =>
+    bool  bearRaw = not na(swingHigh) and high > swingHigh and close < swingHigh
+    bool  bullRaw = not na(swingLow)  and low  < swingLow  and close > swingLow
+    float bearExc = bearRaw ? high - swingHigh : 0.0
+    float bullExc = bullRaw ? swingLow - low   : 0.0
+    bool  bear    = bearRaw and (not bullRaw or bearExc >= bullExc)
+    bool  bull    = bullRaw and not bear
+    bear ? -1 : bull ? 1 : 0
+
+// -----------------------------------------------------------------------------
+// checkMacroTrend()
+//   bullish setup -> close > EMA ;  bearish setup -> close < EMA.
+//   Se evalua UNA sola vez, en el momento de armar el setup (barra del sweep).
+//   Para moverlo a la confirmacion del MSS basta con trasladar la llamada.
+// -----------------------------------------------------------------------------
+checkMacroTrend(bool isLongSetup) =>
+    not useMacroTrendFilter ? true : isLongSetup ? close > macroEma : close < macroEma
+
+// -----------------------------------------------------------------------------
+// checkMomentum()
+//   Vela de momentum alcista = close > open ; bajista = close < open.
+//   (Sin filtros adicionales: ni ATR, ni tamano de cuerpo, ni volumen.)
+//   La racha se cuenta terminando en la barra actual y se LIMITA a las barras
+//   transcurridas desde el sweep (maxRun), para que el momentum pertenezca
+//   siempre al leg posterior al sweep y no a un tramo anterior.
+// -----------------------------------------------------------------------------
+checkMomentum(bool isLongSetup, int bullRun, int bearRun, int maxRun) =>
+    int run = math.min(isLongSetup ? bullRun : bearRun, maxRun)
+    run >= requiredMomentumCandles
+
+// -----------------------------------------------------------------------------
+// detectMSS()   (Market Structure Shift / CHoCH)
+//   Estructura: el swing OPUESTO al lado barrido, vigente y confirmado en el
+//   momento del sweep (se congela al armar el setup):
+//       - sweep bajista (raid de maximos) -> estructura = ultimo swing LOW
+//         confirmado  ->  MSS BAJISTA cuando close < ese swing low.
+//       - sweep alcista (raid de minimos) -> estructura = ultimo swing HIGH
+//         confirmado  ->  MSS ALCISTA cuando close > ese swing high.
+//   Confirmacion: PRIMERA barra en la que se cumplen simultaneamente
+//       (a) cierre mas alla del nivel estructural, y
+//       (b) racha de velas de momentum >= requiredMomentumCandles.
+//   Direccion del MSS = direccion del setup = contraria al lado barrido.
+// -----------------------------------------------------------------------------
+detectMSS(bool isLongSetup, float structuralLevel, int bullRun, int bearRun, int barsSinceSweep) =>
+    bool structureBroken = na(structuralLevel) ? false : isLongSetup ? close > structuralLevel : close < structuralLevel
+    bool momentumOk      = checkMomentum(isLongSetup, bullRun, bearRun, barsSinceSweep)
+    structureBroken and momentumOk
+
+// -----------------------------------------------------------------------------
+// calculateFib50()
+//   Leg = sweepExtreme -> mssPoint.  Unico nivel: 50%.
+//       entry = sweepExtreme + (mssPoint - sweepExtreme) * 0.5
+//   Valido en ambas direcciones (es el punto medio del leg).
+// -----------------------------------------------------------------------------
+calculateFib50(float sweepExtreme, float mssPoint) =>
+    sweepExtreme + (mssPoint - sweepExtreme) * 0.5
+
+// -----------------------------------------------------------------------------
+// checkEntry()   -> tap del nivel 50% por parte del rango de la barra
+// -----------------------------------------------------------------------------
+checkEntry(float level) =>
+    not na(level) and high >= level and low <= level
+
+// -----------------------------------------------------------------------------
+// calculateRiskLevels()   -> [stop, target] a partir del ATR de la barra de entrada
+// -----------------------------------------------------------------------------
+calculateRiskLevels(bool isLongSetup, float entryPrice, float atrAtEntry) =>
+    float risk   = atrAtEntry * stopLossATRMultiplier
+    float reward = atrAtEntry * takeProfitATRMultiplier
+    [isLongSetup ? entryPrice - risk : entryPrice + risk, isLongSetup ? entryPrice + reward : entryPrice - reward]
+
+// -----------------------------------------------------------------------------
+// FUNCIONES DE ESTADISTICA  (puras; operan sobre el array de R cerradas)
+//   Convencion: una operacion es GANADORA si R > 0. R = -1 exacto en el SL.
+//   Los bucles estan protegidos: en Pine, "for i = 0 to -1" iteraria hacia
+//   atras, asi que nunca se entra con el array vacio.
+// -----------------------------------------------------------------------------
+sumR(array<float> a, int startIdx) =>
+    float s = 0.0
+    int   n = array.size(a)
+    if n > 0 and startIdx <= n - 1
+        for i = startIdx to n - 1
+            s += array.get(a, i)
+    s
+
+countWins(array<float> a, int startIdx) =>
+    int c = 0
+    int n = array.size(a)
+    if n > 0 and startIdx <= n - 1
+        for i = startIdx to n - 1
+            if array.get(a, i) > 0
+                c += 1
+    c
+
+// -----------------------------------------------------------------------------
+// stateName()  -> etiqueta legible del estado (debug)
+// -----------------------------------------------------------------------------
+stateName(int s) =>
+    s == STATE_IDLE  ? "IDLE" :
+     s == STATE_SWEEP ? "SWEEP_DETECTED / WAITING_FOR_MSS" :
+     s == STATE_MSS   ? "MSS_CONFIRMED / WAITING_FOR_50_RETRACE" : "ENTRY_TRIGGERED"
+
+fmtPrice(float v) => na(v) ? "-" : str.tostring(v, format.mintick)
+// Los R se calculan por division, asi que un resultado plano puede quedar en
+// -1e-16 y mostrarse como "-0.0R" en rojo. zeroClean() colapsa esos residuos.
+zeroClean(float v) => math.abs(v) < 1e-6 ? 0.0 : v                                       //  na -> na
+fmtR1(float v)    => na(v) ? "-" : (zeroClean(v) >= 0 ? "+" : "") + str.tostring(zeroClean(v), "0.0")  + "R"   //  +9.0R
+fmtR2(float v)    => na(v) ? "-" : (zeroClean(v) >= 0 ? "+" : "") + str.tostring(zeroClean(v), "0.00") + "R"   //  +0.60R
+fmtRc(float v)    => na(v) ? "-" : (zeroClean(v) >= 0 ? "+" : "") + str.tostring(zeroClean(v), "0.#")  + "R"   //  +2R / -1R
+signCol(float v)  => na(v) or math.abs(v) < 1e-6 ? COL_TXT : v > 0 ? COL_BULL : COL_BEAR
+
+// =============================================================================
+//  5. MEMORIA DE SWINGS Y MOMENTUM
+// =============================================================================
+var float lastSwingHigh    = na
+var float lastSwingLow     = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar  = na
+
+var int   bullRun = 0        // velas alcistas consecutivas terminando en la barra actual
+var int   bearRun = 0        // velas bajistas consecutivas terminando en la barra actual
+
+[newSwingHigh, newSwingLow] = detectSwing()
+
+// =============================================================================
+//  6. ESTADO DEL SETUP (una sola instancia viva -> imposible cruzar setups)
+// =============================================================================
+var int   setupState      = STATE_IDLE
+var bool  setupIsLong     = false      // direccion del SETUP (contraria al lado barrido)
+var float sweptLevel      = na         // precio del swing atacado
+var float sweepExtreme    = na         // extremo alcanzado por el sweep (origen del leg)
+var int   sweepBarIndex   = na
+var float structuralLevel = na         // nivel que debe romperse para el MSS
+var float legExtreme      = na         // extremo corriente del leg post-sweep
+var int   mssBarIndex     = na
+var float mssPoint        = na         // extremo del leg en la confirmacion del MSS
+var float entryLevel      = na         // Fib 50%
+var int   phaseStartBar   = na         // inicio de la fase actual (para la expiracion)
+var float entryPrice      = na
+var float slLevel         = na
+var float tpLevel         = na
+var int   entryBarIndex   = na
+var line  fibLine         = na
+
+// -----------------------------------------------------------------------------
+//  TRACKER DE OPERACIONES
+//   Vive al margen de la maquina de estados: el setup termina en la entrada,
+//   pero la operacion sigue abierta hasta tocar SL o TP. Se admiten operaciones
+//   simultaneas (no se suprime ninguna senal), cada una con su propio estado.
+//   Solo se registran operaciones con riesgo > 0 (SL multiplier > 0).
+// -----------------------------------------------------------------------------
+var array<float> tEntry  = array.new<float>()
+var array<float> tSL     = array.new<float>()
+var array<float> tTP     = array.new<float>()
+var array<float> tRisk   = array.new<float>()
+var array<bool>  tIsLong = array.new<bool>()
+var array<box>   tBoxSL  = array.new<box>()
+var array<box>   tBoxTP  = array.new<box>()
+var array<line>  tLine   = array.new<line>()
+
+// R cerradas, en orden cronologico. Unica fuente del panel de estadisticas.
+var array<float> closedR = array.new<float>()
+
+// SL/TP se calculan en scope global con los datos del setup vigente (entryLevel y
+// setupIsLong provienen SIEMPRE de barras anteriores, porque la entrada nunca puede
+// ocurrir en la misma barra que el MSS) y solo se ALMACENAN si hay entrada.
+[pendingSL, pendingTP] = calculateRiskLevels(setupIsLong, entryLevel, atrValue)
+
+// Eventos expuestos para alertas
+bool sweepEvent = false
+bool mssEvent   = false
+bool entryEvent = false
+
+// =============================================================================
+//  7. MAQUINA DE ESTADOS
+//     Todo se ejecuta sobre barra CERRADA (barstate.isconfirmed) => no repinta.
+// =============================================================================
+if barstate.isconfirmed
+
+    // --- 7.1 Actualizacion de swings confirmados ------------------------------
+    if not na(newSwingHigh)
+        lastSwingHigh    := newSwingHigh
+        lastSwingHighBar := bar_index - pivotRightBars
+    if not na(newSwingLow)
+        lastSwingLow    := newSwingLow
+        lastSwingLowBar := bar_index - pivotRightBars
+
+    // --- 7.2 Rachas de momentum ----------------------------------------------
+    bullRun := close > open ? bullRun + 1 : 0
+    bearRun := close < open ? bearRun + 1 : 0
+
+    // --- 7.3 resetSetup(): cierre / invalidacion del setup vigente ------------
+    //   a) La entrada se disparo en la barra anterior  -> setup COMPLETED.
+    //   b) Expiracion de la fase (setupExpiryBars).
+    //   c) El precio supera el extremo del sweep (raid superado / >100% del leg)
+    //      -> el setup pierde su premisa.
+    bool doReset = false
+    if setupState == STATE_ENTRY
+        doReset := true
+    else if setupState != STATE_IDLE
+        bool expired = setupExpiryBars > 0 and (bar_index - phaseStartBar) > setupExpiryBars
+        bool overrun = setupIsLong ? low < sweepExtreme : high > sweepExtreme
+        if expired or overrun
+            doReset := true
+            if showDrawingsAndLabels and setupState == STATE_MSS and not na(fibLine)
+                line.set_x2(fibLine, bar_index)
+    if doReset
+        setupState      := STATE_IDLE
+        setupIsLong     := false
+        sweptLevel      := na
+        sweepExtreme    := na
+        sweepBarIndex   := na
+        structuralLevel := na
+        legExtreme      := na
+        mssBarIndex     := na
+        mssPoint        := na
+        entryLevel      := na
+        phaseStartBar   := na
+        fibLine         := na
+
+    // --- 7.4 Deteccion de sweep en la barra actual ----------------------------
+    int sweepDir = detectSweep(lastSwingHigh, lastSwingLow)
+
+    // --- 7.5 STATE_MSS : nivel 50% activo, esperando el tap -------------------
+    //   Se evalua ANTES del bloque de MSS, de modo que la barra que confirma el
+    //   MSS jamas puede generar simultaneamente la entrada.
+    if setupState == STATE_MSS
+        if checkEntry(entryLevel)
+            entryPrice    := entryLevel
+            slLevel       := pendingSL      // congelados: no se mueven aunque cambie el ATR
+            tpLevel       := pendingTP
+            entryBarIndex := bar_index
+            setupState    := STATE_ENTRY
+            entryEvent    := true
+            // ---- alta de la operacion en el tracker + zonas de riesgo -------
+            float tradeRisk   = math.abs(entryPrice - slLevel)
+            float tradeReward = math.abs(tpLevel - entryPrice)
+            float rrRatio     = tradeRisk > 0 ? tradeReward / tradeRisk : na
+            box   newBoxSL    = na
+            box   newBoxTP    = na
+            if showDrawingsAndLabels
+                if not na(fibLine)
+                    line.set_x2(fibLine, bar_index)
+                label.new(bar_index, entryLevel, "Entry",
+                          style     = setupIsLong ? label.style_label_up : label.style_label_down,
+                          color     = setupIsLong ? COL_BULL : COL_BEAR,
+                          textcolor = COL_TXT, size = size.small)
+                if showRiskRewardBoxes
+                    // Zona SL (roja) y zona TP (verde). La altura relativa de las
+                    // dos cajas ES el R:R, legible de un vistazo.
+                    newBoxSL := box.new(bar_index, math.max(entryPrice, slLevel), bar_index + 1, math.min(entryPrice, slLevel),
+                                          bgcolor      = color.new(COL_BEAR, slBoxTransparency),
+                                          border_color = color.new(COL_BEAR, math.max(0, slBoxTransparency - 25)),
+                                          border_width = 1,
+                                          text         = "SL -1.0R",
+                                          text_color   = color.new(COL_BEAR, 0),
+                                          text_size    = size.tiny,
+                                          text_halign  = text.align_left,
+                                          text_valign  = setupIsLong ? text.align_bottom : text.align_top)
+                    newBoxTP := box.new(bar_index, math.max(entryPrice, tpLevel), bar_index + 1, math.min(entryPrice, tpLevel),
+                                          bgcolor      = color.new(COL_BULL, tpBoxTransparency),
+                                          border_color = color.new(COL_BULL, math.max(0, tpBoxTransparency - 25)),
+                                          border_width = 1,
+                                          text         = "TP +" + (na(rrRatio) ? "?" : str.tostring(rrRatio, "0.0")) + "R",
+                                          text_color   = color.new(COL_BULL, 0),
+                                          text_size    = size.tiny,
+                                          text_halign  = text.align_left,
+                                          text_valign  = setupIsLong ? text.align_top : text.align_bottom)
+            if tradeRisk > 0
+                array.push(tEntry,  entryPrice)
+                array.push(tSL,     slLevel)
+                array.push(tTP,     tpLevel)
+                array.push(tRisk,   tradeRisk)
+                array.push(tIsLong, setupIsLong)
+                array.push(tBoxSL,  newBoxSL)
+                array.push(tBoxTP,  newBoxTP)
+                array.push(tLine,   fibLine)
+        else
+            if showDrawingsAndLabels and not na(fibLine)
+                line.set_x2(fibLine, bar_index)
+
+    // --- 7.6 STATE_SWEEP : esperando el MSS -----------------------------------
+    bool mssJustConfirmed = false
+    if setupState == STATE_SWEEP
+        // extremo corriente del leg post-sweep
+        legExtreme := setupIsLong ? math.max(legExtreme, high) : math.min(legExtreme, low)
+
+        if detectMSS(setupIsLong, structuralLevel, bullRun, bearRun, bar_index - sweepBarIndex + 1)
+            mssJustConfirmed := true
+            mssBarIndex      := bar_index
+            mssPoint         := legExtreme                              // MSS point = extremo del leg
+            entryLevel       := calculateFib50(sweepExtreme, mssPoint)  // Fib 50%
+            phaseStartBar    := bar_index
+            setupState       := STATE_MSS
+            mssEvent         := true
+            if showDrawingsAndLabels
+                label.new(bar_index, setupIsLong ? low : high, "MSS",
+                          style     = setupIsLong ? label.style_label_up : label.style_label_down,
+                          color     = setupIsLong ? COL_BULL : COL_BEAR,
+                          textcolor = COL_TXT, size = size.small)
+                fibLine := line.new(mssBarIndex, entryLevel, bar_index, entryLevel, color = COL_FIB, width = 1)
+                label.new(bar_index, entryLevel, "50%", style = label.style_none, textcolor = COL_FIB, size = size.tiny)
+
+    // --- 7.7 Armado de un nuevo setup ----------------------------------------
+    //   - Desde IDLE: cualquier sweep valido arma el setup.
+    //   - Desde STATE_SWEEP (aun sin MSS): un sweep nuevo SUSTITUYE al anterior
+    //     (la liquidez recien barrida es la relevante).
+    //   - Desde STATE_MSS/STATE_ENTRY: NO se sustituye; el setup vivo se respeta.
+    //   NOTA: esta regla de sustitucion es el parametro que mas afecta al numero
+    //   de setups. Para NO sustituir nunca, dejar: canArm = setupState == STATE_IDLE
+    bool canArm = setupState == STATE_IDLE or (setupState == STATE_SWEEP and not mssJustConfirmed)
+    if canArm and sweepDir != 0
+        bool isLong    = sweepDir == 1
+        float swept    = isLong ? lastSwingLow  : lastSwingHigh
+        float extreme  = isLong ? low           : high
+        float struct_  = isLong ? lastSwingHigh : lastSwingLow   // swing opuesto = estructura del MSS
+        // Requisitos: debe existir estructura opuesta y NO puede estar ya rota,
+        // ademas del filtro de tendencia macro.
+        bool structOk  = not na(struct_) and (isLong ? close < struct_ : close > struct_)
+        if structOk and checkMacroTrend(isLong)
+            setupState      := STATE_SWEEP
+            setupIsLong     := isLong
+            sweptLevel      := swept
+            sweepExtreme    := extreme
+            sweepBarIndex   := bar_index
+            structuralLevel := struct_
+            legExtreme      := extreme
+            mssBarIndex     := na
+            mssPoint        := na
+            entryLevel      := na
+            phaseStartBar   := bar_index
+            fibLine         := na
+            sweepEvent      := true
+            // El swing barrido se consume: no puede volver a generar sweeps hasta
+            // que se confirme un pivot nuevo en ese lado.
+            if isLong
+                lastSwingLow := na
+            else
+                lastSwingHigh := na
+            if showDrawingsAndLabels
+                label.new(bar_index, extreme, "Sweep",
+                          style     = isLong ? label.style_label_up : label.style_label_down,
+                          color     = color.new(isLong ? COL_BULL : COL_BEAR, 25),
+                          textcolor = COL_TXT, size = size.small)
+
+    // --- 7.8 Gestion de operaciones abiertas (resolucion SL/TP) ---------------
+    //   Reglas de resolucion (deterministas y conservadoras):
+    //     a) Se evalua desde la PROPIA barra de entrada: el precio pasa
+    //        necesariamente por el nivel 50% antes que por el SL (que esta al
+    //        otro lado del nivel), luego el stop de esa barra es real.
+    //     b) Si una misma barra toca SL y TP, PRIORIDAD AL SL (peor caso).
+    //     c) No hay stop temporal: la operacion vive hasta tocar SL o TP.
+    //   R = (salida - entrada) / riesgo, con signo segun la direccion.
+    //   -> Perdida = -1.00R exacto ; Ganancia = takeProfitATR / stopLossATR.
+    if array.size(tEntry) > 0
+        for k = array.size(tEntry) - 1 to 0
+            bool  isL  = array.get(tIsLong, k)
+            float en   = array.get(tEntry,  k)
+            float sl   = array.get(tSL,     k)
+            float tp   = array.get(tTP,     k)
+            float rk   = array.get(tRisk,   k)
+            box   bSL  = array.get(tBoxSL,  k)
+            box   bTP  = array.get(tBoxTP,  k)
+            line  lnE  = array.get(tLine,   k)
+            bool  hitSL = isL ? low  <= sl : high >= sl
+            bool  hitTP = isL ? high >= tp : low  <= tp
+
+            if hitSL or hitTP
+                float exitPrice = hitSL ? sl : tp                     // prioridad al SL
+                float r         = (isL ? exitPrice - en : en - exitPrice) / rk
+                array.push(closedR, r)
+                if not na(bSL)
+                    box.set_right(bSL, bar_index)
+                if not na(bTP)
+                    box.set_right(bTP, bar_index)
+                if not na(lnE)
+                    line.set_x2(lnE, bar_index)
+                if showDrawingsAndLabels
+                    // marca visual del resultado: ganadora (verde) / perdedora (roja)
+                    label.new(bar_index, exitPrice,
+                              (r > 0 ? "TP +" : "SL ") + str.tostring(r, "0.0") + "R",
+                              style     = label.style_label_left,
+                              color     = r > 0 ? COL_BULL : COL_BEAR,
+                              textcolor = COL_TXT, size = size.tiny)
+                if not keepHistoricalBoxes
+                    if not na(bSL)
+                        box.delete(bSL)
+                    if not na(bTP)
+                        box.delete(bTP)
+                array.remove(tEntry,  k)
+                array.remove(tSL,     k)
+                array.remove(tTP,     k)
+                array.remove(tRisk,   k)
+                array.remove(tIsLong, k)
+                array.remove(tBoxSL,  k)
+                array.remove(tBoxTP,  k)
+                array.remove(tLine,   k)
+            else
+                // operacion activa: las zonas y la linea de entrada se extienden
+                if not na(bSL)
+                    box.set_right(bSL, bar_index + 1)
+                if not na(bTP)
+                    box.set_right(bTP, bar_index + 1)
+                if not na(lnE)
+                    line.set_x2(lnE, bar_index)
+
+// =============================================================================
+//  8. VISUALIZACION AUXILIAR
+// =============================================================================
+plot(showDrawingsAndLabels and useMacroTrendFilter ? macroEma : na, "Macro Trend EMA", color = color.new(color.gray, 30))
+
+// =============================================================================
+//  9. DEBUG MODE
+// =============================================================================
+if debugMode and barstate.islast
+    var table dbg = table.new(position.top_right, 2, 12, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 50))
+    table.cell(dbg, 0, 0,  "MSS SFR · DEBUG",   text_color = COL_FIB,   text_size = size.small, text_halign = text.align_left)
+    table.cell(dbg, 1, 0,  "",                  text_color = COL_TXT,   text_size = size.small)
+    table.cell(dbg, 0, 1,  "Setup state",       text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 1,  stateName(setupState), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 2,  "Last swing high",   text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 2,  fmtPrice(lastSwingHigh), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 3,  "Last swing low",    text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 3,  fmtPrice(lastSwingLow), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 4,  "Setup direction",   text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 4,  setupState == STATE_IDLE ? "-" : setupIsLong ? "LONG (bullish sweep)" : "SHORT (bearish sweep)", text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 5,  "Swept level",       text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 5,  fmtPrice(sweptLevel), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 6,  "Sweep extreme",     text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 6,  fmtPrice(sweepExtreme), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 7,  "MSS level (struct)", text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 7,  fmtPrice(structuralLevel), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 8,  "MSS point / leg ext", text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 8,  fmtPrice(setupState == STATE_SWEEP ? legExtreme : mssPoint), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 9,  "Momentum run (bull/bear)", text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 9,  str.tostring(bullRun) + " / " + str.tostring(bearRun) + "  (req " + str.tostring(requiredMomentumCandles) + ")", text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 10, "Fib 50% (entry)",   text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 10, fmtPrice(entryLevel), text_color = COL_FIB, text_size = size.tiny, text_halign = text.align_right)
+    table.cell(dbg, 0, 11, "Macro trend",       text_color = color.silver, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dbg, 1, 11, (useMacroTrendFilter ? "ON  " : "OFF ") + (close > macroEma ? "· price > EMA" : "· price < EMA"), text_color = COL_TXT, text_size = size.tiny, text_halign = text.align_right)
+
+// =============================================================================
+// 10. ALERTAS
+// =============================================================================
+alertcondition(sweepEvent, "Sweep detected",  "MSS SFR: liquidity sweep detected")
+alertcondition(mssEvent,   "MSS confirmed",   "MSS SFR: market structure shift confirmed")
+alertcondition(entryEvent, "Entry (50% tap)", "MSS SFR: price tapped the 50% entry level")
+
+// =============================================================================
+// 11. PANEL DE ESTADISTICAS  (minimalista)
+// -----------------------------------------------------------------------------
+//   Se alimenta EXCLUSIVAMENTE de operaciones CERRADAS que pasaron por el
+//   50% Tap (array closedR). No cuentan sweeps sin MSS, MSS sin entrada,
+//   setups cancelados/expirados ni niveles 50% que nunca fueron tocados.
+//
+//   Layout (PANEL_COLS columnas x 8 filas, con celdas fusionadas):
+//     fila 0   MSS SWEEP FIB RETRACE
+//     fila 1   by @nico66fx
+//     fila 2   WIN RATE     |  53.3%
+//     fila 3   TOTAL R      |  +9.0R
+//     fila 4   AVG R        |  +0.60R
+//     fila 5   LAST 15 R    |  +4.0R
+//     fila 6   LAST TRADES
+//     fila 7   una columna por operacion (verde si +R, roja si -R)
+//   La estructura y las fusiones se crean UNA sola vez; despues solo se
+//   reescribe el contenido de las celdas.
+// =============================================================================
+var table panel     = na
+var bool  panelInit = false
+
+if showStatsPanel and barstate.islast
+    int   nT     = array.size(closedR)
+    int   nW     = countWins(closedR, 0)
+    float winRt  = nT > 0 ? 100.0 * nW / nT : na
+    float totR   = sumR(closedR, 0)
+    float avgR   = nT > 0 ? totR / nT : na
+    int   startN = math.max(0, nT - statsLookbackTrades)
+    float lastR  = nT > 0 ? sumR(closedR, startN) : na
+
+    // ---- construccion (una unica vez) ---------------------------------------
+    //   La estructura, la alineacion y las fusiones se crean una sola vez.
+    //   El refresco posterior usa table.cell_set_*(), que es la via correcta
+    //   para modificar celdas fusionadas sin volver a fusionarlas.
+    if not panelInit
+        panel := table.new(position.bottom_right, PANEL_COLS, 8,
+                              bgcolor      = color.new(color.black, 15),
+                              border_width = 0,
+                              frame_width  = 1,
+                              frame_color  = color.new(color.gray, 50))
+        for r = 0 to 7
+            for cc = 0 to PANEL_COLS - 1
+                table.cell(panel, cc, r, "",
+                              text_size   = size.tiny,
+                              text_color  = COL_TXT,
+                              text_halign = r == 7 ? text.align_center : cc == 0 ? text.align_left : text.align_right)
+        table.merge_cells(panel, 0, 0, PANEL_COLS - 1, 0)   // titulo
+        table.merge_cells(panel, 0, 1, PANEL_COLS - 1, 1)   // firma
+        for r = 2 to 5                                      // etiqueta | valor
+            table.merge_cells(panel, 0, r, 4, r)
+            table.merge_cells(panel, 5, r, PANEL_COLS - 1, r)
+        table.merge_cells(panel, 0, 6, PANEL_COLS - 1, 6)   // "LAST TRADES"
+        panelInit := true
+
+    // ---- refresco de contenido ----------------------------------------------
+    table.cell_set_text(panel, 0, 0, "MSS SWEEP FIB RETRACE")
+    table.cell_set_text_color(panel, 0, 0, COL_FIB)
+    table.cell_set_text(panel, 0, 1, "by @nico66fx")
+    table.cell_set_text_color(panel, 0, 1, color.gray)
+
+    table.cell_set_text(panel, 0, 2, "WIN RATE")
+    table.cell_set_text_color(panel, 0, 2, color.silver)
+    table.cell_set_text(panel, 5, 2, na(winRt) ? "-" : str.tostring(winRt, "0.0") + "%")
+    table.cell_set_text_color(panel, 5, 2, COL_TXT)
+
+    table.cell_set_text(panel, 0, 3, "TOTAL R")
+    table.cell_set_text_color(panel, 0, 3, color.silver)
+    table.cell_set_text(panel, 5, 3, nT > 0 ? fmtR1(totR) : "-")
+    table.cell_set_text_color(panel, 5, 3, signCol(nT > 0 ? totR : na))
+
+    table.cell_set_text(panel, 0, 4, "AVG R")
+    table.cell_set_text_color(panel, 0, 4, color.silver)
+    table.cell_set_text(panel, 5, 4, fmtR2(avgR))
+    table.cell_set_text_color(panel, 5, 4, signCol(avgR))
+
+    table.cell_set_text(panel, 0, 5, "LAST " + str.tostring(statsLookbackTrades) + " R")
+    table.cell_set_text_color(panel, 0, 5, color.silver)
+    table.cell_set_text(panel, 5, 5, fmtR1(lastR))
+    table.cell_set_text_color(panel, 5, 5, signCol(lastR))
+
+    table.cell_set_text(panel, 0, 6, "LAST TRADES")
+    table.cell_set_text_color(panel, 0, 6, color.silver)
+
+    // Fila compacta: las ultimas PANEL_COLS operaciones, alineadas a la derecha
+    // (la mas reciente en la ultima columna). Verde si gana, roja si pierde.
+    for cc = 0 to PANEL_COLS - 1
+        int idx = nT - (PANEL_COLS - cc)
+        table.cell_set_text(panel, cc, 7, idx >= 0 ? fmtRc(array.get(closedR, idx)) : "")
+        table.cell_set_text_color(panel, cc, 7, idx >= 0 ? (array.get(closedR, idx) > 0 ? COL_BULL : COL_BEAR) : COL_TXT)

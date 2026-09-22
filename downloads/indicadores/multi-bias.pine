@@ -1,0 +1,323 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+//  NICO66FX — MULTI BIAS · motor estructural NSBE
+//  © nico66fx
+//
+//  Un panel que responde a una sola pregunta en ocho temporalidades a la vez:
+//  ¿el precio está por encima del último swing alto confirmado o por debajo
+//  del último swing bajo? Sin puntuaciones, sin umbrales: un estado por TF.
+//
+//  REPINTADO · NO REPINTA con los ajustes por defecto: cada temporalidad
+//  muestra el estado de su última vela CERRADA (expresión desplazada [1] con
+//  lookahead_on) y el swing no existe hasta que cierran las velas de
+//  confirmación. Sí repinta si TÚ apagas el interruptor "Modo SIN REPINTADO",
+//  y las filas de temporalidades menores que la del gráfico no son fiables si
+//  desactivas "Ocultar TF inferiores al gráfico". Ambos avisos están en sus
+//  tooltips.
+// ═════════════════════════════════════════════════════════════════════════════
+indicator("NICO66FX — MULTI BIAS", "NICO66FX ▪ MB", overlay = true, max_bars_back = 500)
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  1 · ENTRADAS
+// ═════════════════════════════════════════════════════════════════════════════
+string G_ENG = "◆ MOTOR ESTRUCTURAL"
+string G_TFS = "◆ TEMPORALIDADES"
+string G_DSH = "◆ PANEL"
+string G_COL = "◆ PALETA NICO66FX"
+string G_ALR = "◆ ALERTAS"
+
+int    swingL    = input.int(5, "Sensibilidad del swing", minval = 1, maxval = 50, group = G_ENG,
+     tooltip = "Velas a la IZQUIERDA que debe dominar un extremo para contar como swing. Más alto = estructura más lenta y temporalidades más alineadas entre sí.")
+int    swingR    = input.int(3, "Confirmación del swing", minval = 1, maxval = 50, group = G_ENG,
+     tooltip = "Velas a la DERECHA necesarias para CONFIRMAR el swing. Es el retardo real del motor: un swing no existe hasta que esas velas cierran. Ese retardo es justamente el precio de no repintar.")
+string brkModeS  = input.string("Cierre", "Confirmación de la ruptura", options = ["Cierre", "Mecha"], group = G_ENG,
+     tooltip = "Cierre = el estado solo cambia si el precio CIERRA más allá del swing (recomendado).\nMecha = basta con perforarlo, aunque luego el precio vuelva dentro.")
+bool   noRepaint = input.bool(true, "Modo SIN REPINTADO", group = G_ENG,
+     tooltip = "ACTIVADO · cada temporalidad muestra el estado de su última vela CERRADA. Lo que ves en el histórico es exactamente lo que se vio en directo.\nDESACTIVADO · usa la vela en formación: reacciona antes, pero REPINTA y el histórico deja de ser fiable. Actívalo salvo que sepas muy bien lo que haces.")
+bool   brkClose  = brkModeS == "Cierre"
+
+bool   en1 = input.bool(true, "TF 1", inline = "t1", group = G_TFS)
+string tf1 = input.timeframe("5",   "", inline = "t1", group = G_TFS)
+bool   en2 = input.bool(true, "TF 2", inline = "t2", group = G_TFS)
+string tf2 = input.timeframe("15",  "", inline = "t2", group = G_TFS)
+bool   en3 = input.bool(true, "TF 3", inline = "t3", group = G_TFS)
+string tf3 = input.timeframe("30",  "", inline = "t3", group = G_TFS)
+bool   en4 = input.bool(true, "TF 4", inline = "t4", group = G_TFS)
+string tf4 = input.timeframe("60",  "", inline = "t4", group = G_TFS)
+bool   en5 = input.bool(true, "TF 5", inline = "t5", group = G_TFS)
+string tf5 = input.timeframe("120", "", inline = "t5", group = G_TFS)
+bool   en6 = input.bool(true, "TF 6", inline = "t6", group = G_TFS)
+string tf6 = input.timeframe("240", "", inline = "t6", group = G_TFS)
+bool   en7 = input.bool(true, "TF 7", inline = "t7", group = G_TFS)
+string tf7 = input.timeframe("D",   "", inline = "t7", group = G_TFS)
+bool   en8 = input.bool(true, "TF 8", inline = "t8", group = G_TFS)
+string tf8 = input.timeframe("W",   "", inline = "t8", group = G_TFS)
+bool   hideLower = input.bool(true, "Ocultar TF inferiores al gráfico", group = G_TFS,
+     tooltip = "Oculta del panel las temporalidades más pequeñas que la del gráfico. DÉJALO ACTIVADO: pedir una temporalidad menor que la del gráfico devuelve el valor del final de la vela actual, así que esas filas no reflejan lo que se veía en directo. Si lo desactivas, esas filas son orientativas y NO valen para auditar el histórico.")
+
+bool   showDash  = input.bool(true, "Mostrar panel", group = G_DSH,
+     tooltip = "Interruptor principal del panel. Este indicador no dibuja nada sobre las velas: solo el panel.")
+string layoutS   = input.string("Horizontal", "Composición", options = ["Horizontal", "Vertical"], group = G_DSH,
+     tooltip = "Horizontal = una columna por temporalidad, en fila. Vertical = una fila por temporalidad, en columna.")
+string dashPosS  = input.string("Superior derecha", "Posición", options = ["Superior izquierda", "Superior centro", "Superior derecha", "Centro izquierda", "Centro", "Centro derecha", "Inferior izquierda", "Inferior centro", "Inferior derecha"], group = G_DSH,
+     tooltip = "Punto del gráfico donde se ancla el panel.")
+string dashSizeS = input.string("Pequeño", "Tamaño del texto", options = ["Diminuto", "Pequeño", "Normal", "Grande"], group = G_DSH,
+     tooltip = "Usa Normal o Grande para capturas y para grabar vídeo.")
+int    dashTrp   = input.int(8, "Transparencia del fondo", minval = 0, maxval = 95, group = G_DSH,
+     tooltip = "0 = panel opaco, 95 = casi invisible.")
+bool   showAlign = input.bool(true, "Línea de alineación", group = G_DSH,
+     tooltip = "Fila superior con el recuento de temporalidades alcistas y bajistas, y un aviso cuando las ocho coinciden.")
+bool   showBrand = input.bool(true, "Marca nico66fx", group = G_DSH,
+     tooltip = "Fila inferior con la firma. Desactívala si quieres el panel más compacto.")
+bool   layoutV   = layoutS == "Vertical"
+
+color cBull  = input.color(#00E5A0, "Alcista", inline = "p1", group = G_COL)
+color cBear  = input.color(#FF3D71, "Bajista", inline = "p1", group = G_COL)
+color cNeut  = input.color(#63748A, "Neutro",  inline = "p1", group = G_COL)
+color cPanel = input.color(#0A0E13, "Panel",   inline = "p2", group = G_COL)
+color cFrame = input.color(#1C2733, "Marco",   inline = "p2", group = G_COL)
+color cText  = input.color(#DCE4EE, "Texto",   inline = "p3", group = G_COL)
+color cDim   = input.color(#78879A, "Tenue",   inline = "p3", group = G_COL)
+
+bool useAlertTF    = input.bool(false, "Avisar al cambiar el sesgo de un TF", group = G_ALR,
+     tooltip = "Lanza una alerta cada vez que una temporalidad cambia de estado. Se dispara al cierre de la vela.")
+bool useAlertAlign = input.bool(false, "Avisar al alinearse todos los TF",   group = G_ALR,
+     tooltip = "Lanza una alerta cuando todas las temporalidades visibles pasan a compartir el mismo estado. Se dispara al cierre de la vela.")
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  2 · NÚCLEO NSBE · máquina de estados estructural
+//
+//  Un solo estado por temporalidad. Cambia únicamente al romper un swing
+//  CONFIRMADO y todavía no consumido: cada nivel provoca como mucho un cambio
+//  de estado. `shift` desplaza el valor una vela DENTRO del contexto de la
+//  temporalidad pedida; es la mitad del blindaje antirrepintado (la otra mitad
+//  es lookahead_on en la petición).
+// ═════════════════════════════════════════════════════════════════════════════
+nsbe(int sL, int sR, bool cBrk, bool shift) =>
+    float ph = ta.pivothigh(sL, sR)   // deja de ser na solo al CONFIRMARSE el swing
+    float pl = ta.pivotlow(sL, sR)
+
+    var float sHi    = na    // último swing alto confirmado
+    var float sLo    = na    // último swing bajo confirmado
+    var bool  hiLive = false // el nivel sigue sin consumirse
+    var bool  loLive = false
+    var int   state  = 0     // +1 alcista | −1 bajista | 0 sin estructura todavía
+
+    if not na(ph)
+        sHi := ph
+        hiLive := true
+
+    if not na(pl)
+        sLo := pl
+        loLive := true
+
+    bool upBrk = hiLive and not na(sHi) and (cBrk ? close > sHi : high > sHi)
+    bool dnBrk = loLive and not na(sLo) and (cBrk ? close < sLo : low  < sLo)
+
+    // Vela envolvente que rompe los dos lados: manda el lado donde acaba el cierre.
+    if upBrk and dnBrk
+        if close >= (sHi + sLo) * 0.5
+            dnBrk := false
+        else
+            upBrk := false
+
+    if upBrk
+        hiLive := false
+        state  := 1
+
+    if dnBrk
+        loLive := false
+        state  := -1
+
+    shift ? state[1] : state
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  3 · UTILIDADES
+// ═════════════════════════════════════════════════════════════════════════════
+// Convierte una temporalidad en etiqueta corta para el panel (5M, 4H, 1D, 1W…)
+tfLabel(string tf) =>
+    int s = timeframe.in_seconds(tf)
+    string r = s < 60      ? str.tostring(s) + "S" :
+               s < 3600    ? str.tostring(int(s / 60)) + "M" :
+               s < 86400   ? str.tostring(int(s / 3600)) + "H" :
+               s < 604800  ? str.tostring(int(s / 86400)) + "D" :
+               s < 2592000 ? str.tostring(int(s / 604800)) + "W" :
+                             str.tostring(int(s / 2592000)) + "MO"
+    r
+
+biasCol(int b)  => b == 1 ? cBull : b == -1 ? cBear : cNeut
+stateTxt(int b) => b == 1 ? "▲ ALZA" : b == -1 ? "▼ BAJA" : "◆ NEUT"
+
+posOf(string s) =>
+    switch s
+        "Superior izquierda" => position.top_left
+        "Superior centro"    => position.top_center
+        "Superior derecha"   => position.top_right
+        "Centro izquierda"   => position.middle_left
+        "Centro"             => position.middle_center
+        "Centro derecha"     => position.middle_right
+        "Inferior izquierda" => position.bottom_left
+        "Inferior centro"    => position.bottom_center
+        => position.bottom_right
+
+sizeOf(string s) =>
+    switch s
+        "Diminuto" => size.tiny
+        "Pequeño"  => size.small
+        "Grande"   => size.large
+        => size.normal
+
+string txtSize = sizeOf(dashSizeS)
+
+// Una temporalidad entra en el panel si está activada y no queda por debajo
+// de la del gráfico cuando el filtro está puesto.
+tfLive(bool en, string tf) =>
+    en and (not hideLower or timeframe.in_seconds(tf) >= timeframe.in_seconds(timeframe.period))
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  4 · MULTITEMPORALIDAD REAL
+//
+//  Ocho peticiones independientes: cada temporalidad ejecuta el motor con SUS
+//  propios datos, no con los del gráfico reescalados.
+//  Antirrepintado = valor[1] dentro del contexto HTF + lookahead_on.
+// ═════════════════════════════════════════════════════════════════════════════
+lookMode = noRepaint ? barmerge.lookahead_on : barmerge.lookahead_off
+
+int s1 = request.security(syminfo.tickerid, tf1, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s2 = request.security(syminfo.tickerid, tf2, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s3 = request.security(syminfo.tickerid, tf3, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s4 = request.security(syminfo.tickerid, tf4, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s5 = request.security(syminfo.tickerid, tf5, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s6 = request.security(syminfo.tickerid, tf6, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s7 = request.security(syminfo.tickerid, tf7, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+int s8 = request.security(syminfo.tickerid, tf8, nsbe(swingL, swingR, brkClose, noRepaint), barmerge.gaps_off, lookMode)
+
+var string[] aName = array.new<string>()
+var int[]    aSt   = array.new<int>()
+
+addTF(bool en, string tf, int st) =>
+    if tfLive(en, tf)
+        array.push(aName, tfLabel(tf))
+        array.push(aSt, na(st) ? 0 : st)
+
+// Los arrays se vacían y se rellenan en cada vela: solo guardan lo visible ahora.
+array.clear(aName)
+array.clear(aSt)
+
+addTF(en1, tf1, s1)
+addTF(en2, tf2, s2)
+addTF(en3, tf3, s3)
+addTF(en4, tf4, s4)
+addTF(en5, tf5, s5)
+addTF(en6, tf6, s6)
+addTF(en7, tf7, s7)
+addTF(en8, tf8, s8)
+
+int nTF   = array.size(aName)
+int nBull = 0
+int nBear = 0
+if nTF > 0
+    for i = 0 to nTF - 1
+        int b = array.get(aSt, i)
+        if b == 1
+            nBull := nBull + 1
+        else if b == -1
+            nBear := nBear + 1
+bool allBull = nTF > 0 and nBull == nTF
+bool allBear = nTF > 0 and nBear == nTF
+int  alignSt = allBull ? 1 : allBear ? -1 : 0
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  5 · PANEL · solo el sesgo, nada más
+// ═════════════════════════════════════════════════════════════════════════════
+int headRows = 1 + (showAlign ? 1 : 0)
+int brandRow = showBrand ? 1 : 0
+
+// Coloca una celda traduciendo (temporalidad, campo) a (columna, fila) según
+// la composición elegida.
+putCell(table t, int tfIdx, int fIdx, string txt, color bg, color tc) =>
+    int c = layoutV ? fIdx : tfIdx
+    int r = (layoutV ? tfIdx : fIdx) + headRows
+    table.cell(t, c, r, txt, bgcolor = bg, text_color = tc, text_size = txtSize,
+         text_font_family = font.family_monospace, text_halign = text.align_center,
+         tooltip = "NICO66FX ▪ MULTI BIAS\nEstado estructural de la temporalidad.\nCambia al cerrar más allá del último swing confirmado.\nnico66fx")
+
+var table dash = na
+var bool  built = false
+
+if showDash and barstate.islast
+    int cols = nTF == 0 ? 1 : (layoutV ? 2 : nTF)
+    int rows = nTF == 0 ? 1 : headRows + (layoutV ? nTF : 2) + brandRow
+
+    if na(dash)
+        dash := table.new(posOf(dashPosS), cols, rows,
+             bgcolor = color.new(cPanel, dashTrp), frame_color = cFrame,
+             frame_width = 1, border_color = cFrame, border_width = 1)
+
+    if nTF == 0
+        table.cell(dash, 0, 0, "NICO66FX ▪ sin temporalidades visibles",
+             bgcolor = color.new(cPanel, 0), text_color = cDim, text_size = txtSize,
+             text_font_family = font.family_monospace)
+    else
+        // Las fusiones de celdas solo pueden hacerse una vez; de ahí el flag.
+        if not built
+            for i = 0 to cols - 1
+                table.cell(dash, i, 0, "", bgcolor = color.new(cFrame, 55))
+                if showAlign
+                    table.cell(dash, i, 1, "", bgcolor = color.new(cPanel, 60))
+                if showBrand
+                    table.cell(dash, i, rows - 1, "", bgcolor = color.new(cPanel, 60))
+            if cols > 1
+                table.merge_cells(dash, 0, 0, cols - 1, 0)
+                if showAlign
+                    table.merge_cells(dash, 0, 1, cols - 1, 1)
+                if showBrand
+                    table.merge_cells(dash, 0, rows - 1, cols - 1, rows - 1)
+            built := true
+
+        table.cell(dash, 0, 0, "  NICO66FX │ MULTI BIAS  ",
+             bgcolor = color.new(cFrame, 55), text_color = cText, text_size = txtSize,
+             text_font_family = font.family_monospace, text_halign = text.align_left)
+
+        if showAlign
+            string aTxt = allBull ? "  ALINEADOS ▲  " + str.tostring(nTF) + "/" + str.tostring(nTF) + "  " : allBear ? "  ALINEADOS ▼  " + str.tostring(nTF) + "/" + str.tostring(nTF) + "  " : "  ▲ " + str.tostring(nBull) + "   ▼ " + str.tostring(nBear) + "   de " + str.tostring(nTF) + "  "
+            table.cell(dash, 0, 1, aTxt, bgcolor = color.new(biasCol(alignSt), alignSt == 0 ? 85 : 70),
+                 text_color = alignSt == 0 ? cDim : biasCol(alignSt), text_size = txtSize,
+                 text_font_family = font.family_monospace, text_halign = text.align_left)
+
+        for i = 0 to nTF - 1
+            int   b   = array.get(aSt, i)
+            color col = biasCol(b)
+            putCell(dash, i, 0, " " + array.get(aName, i) + " ", color.new(cFrame, 30), cText)
+            putCell(dash, i, 1, " " + stateTxt(b) + " ", color.new(col, 78), col)
+
+        if showBrand
+            table.cell(dash, 0, rows - 1, "  nico66fx · sesgo estructural  ",
+                 bgcolor = color.new(cPanel, 60), text_color = cDim, text_size = size.tiny,
+                 text_font_family = font.family_monospace, text_halign = text.align_left)
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  6 · ALERTAS
+//  Siempre al cierre de la vela: freq_once_per_bar_close.
+// ═════════════════════════════════════════════════════════════════════════════
+var int[] prevB = array.new<int>(8, 0)
+
+if useAlertTF and nTF > 0
+    for i = 0 to math.min(nTF, 8) - 1
+        int b = array.get(aSt, i)
+        if b != 0 and b != array.get(prevB, i)
+            alert("NICO66FX ▪ " + syminfo.ticker + " · " + array.get(aName, i) + " → " +
+                 (b == 1 ? "ALCISTA" : "BAJISTA"), alert.freq_once_per_bar_close)
+        array.set(prevB, i, b)
+
+var int prevAlign = 0
+if useAlertAlign and alignSt != 0 and alignSt != prevAlign
+    alert("NICO66FX ▪ " + syminfo.ticker + " · TODAS LAS TEMPORALIDADES ALINEADAS " +
+         (alignSt == 1 ? "▲ ALCISTA" : "▼ BAJISTA"), alert.freq_once_per_bar_close)
+prevAlign := alignSt

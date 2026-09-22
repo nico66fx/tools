@@ -1,0 +1,41 @@
+# PACK 3 INDICADORES — nico66fx
+
+**Tres herramientas de TradingView. Gratis. Código abierto en Pine Script v6.**
+
+---
+
+**1 · CRT Trade Planner**
+
+Automatiza el marco Candle Range Theory. Coge la última vela cerrada de una temporalidad superior, la convierte en un rango, y espera a que el precio barra uno de los extremos y cierre de vuelta dentro. Cuando eso pasa, te dibuja el plan entero: entrada, stop, objetivo y la relación riesgo-beneficio, más un panel con el estado del rango en tiempo real. No repinta: el rango sale siempre de una vela ya cerrada y las señales se confirman solo con velas cerradas del gráfico. Va bien en índices, forex mayor, oro y BTC, con el gráfico entre M5 y H1.
+
+---
+
+**2 · NICO66FX — MULTI BIAS**
+
+Un panel que hace una sola pregunta en ocho temporalidades a la vez: ¿el precio ha cerrado por encima del último swing alto confirmado, o por debajo del último swing bajo? Cada temporalidad vive en un único estado, alcista o bajista, y solo cambia al romper estructura. Sin puntuaciones, sin porcentajes, sin medias tintas. Con los ajustes de fábrica no repinta: cada fila muestra el estado de su última vela cerrada, así que lo que ves en el histórico es lo que se vio en directo. No dibuja nada sobre las velas, solo el panel. Funciona igual en cualquier mercado.
+
+---
+
+**3 · Liquidity Magnet**
+
+Marca las bolsas de liquidez que el precio va dejando en máximos y mínimos pivote, funde las que están al mismo nivel y las ordena por peso, combinando volumen, distancia, edad y momento. Te señala cuál tira más ahora mismo, con un imán y una línea de campo, y te da las tres mejores en el panel. Los niveles no repintan, porque salen de pivotes ya confirmados; el ranking sí es una foto del momento y se recalcula en cada vela. No da entradas: es un mapa de dónde está la liquidez. Donde mejor se ve es en cripto e índices, entre 15m y 4H.
+
+---
+
+**Cada indicador lleva su MANUAL** con la instalación paso a paso, los tres ajustes que hay que tocar primero, dónde tiene sentido usarlo y una sección de *qué NO hace*. Léela. Está escrita precisamente para que nadie espere de estas herramientas algo que no dan.
+
+---
+
+**AVISO**
+
+Esto son herramientas de análisis, no sistemas de trading, y no toman ninguna decisión por ti. Ninguna de las tres envía órdenes ni gestiona operaciones.
+
+Antes de usar cualquiera de ellas con dinero real: **backtestéalas** en tu activo y tu temporalidad, y después **pruébalas en demo** el tiempo que haga falta hasta que entiendas cómo se comportan cuando el mercado no acompaña.
+
+Las estadísticas que muestran los paneles son orientativas y tienen sesgos que están explicados en cada manual. No son un backtest.
+
+Aquí no se promete rentabilidad de ningún tipo. Operar con apalancamiento conlleva riesgo de perder tu capital.
+
+---
+
+*© nico66fx*

@@ -1,0 +1,549 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+//  CRT TRADE PLANNER · Candle Range Theory
+//  © nico66fx
+//
+//  Toma la última vela CERRADA de una temporalidad superior y la convierte en
+//  un rango operable: espera el barrido de uno de sus extremos y el cierre de
+//  vuelta dentro, y dibuja el plan entero (entrada, SL, TP, R:R y panel).
+//
+//  REPINTADO · NO REPINTA. El rango sale siempre de la vela HTF ya cerrada
+//  (request.security con la expresión desplazada [1] y lookahead_on) y toda
+//  señal se valida con barstate.isconfirmed, es decir, solo sobre velas
+//  cerradas del gráfico. Dentro de la vela en curso únicamente se mueven la
+//  caja gris del rango vivo y el panel; ninguna flecha, SL o TP se recoloca.
+// ═════════════════════════════════════════════════════════════════════════════
+indicator(title      = "CRT Trade Planner [nico66fx]",
+             shorttitle = "CRT · nico66fx",
+             overlay    = true,
+             max_boxes_count  = 500,
+             max_labels_count = 500,
+             max_lines_count  = 500)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  1 · ENTRADAS (agrupadas)
+// ═════════════════════════════════════════════════════════════════════════════
+G_RANGE  = "① Rango (CRT)"
+G_FILTER = "② Filtros de calidad"
+G_WINDOW = "③ Ventana de trading"
+G_LEVELS = "④ Niveles adicionales"
+G_VISUAL = "⑤ Visual / Colores"
+G_PANEL  = "⑥ Panel y estadísticas"
+
+// ---- ① Rango ---------------------------------------------------------------
+htf       = input.timeframe("240", "Temporalidad del rango",
+             tooltip = "Temporalidad superior (HTF) cuya última vela CERRADA define el rango CRT. Por defecto H4 (240). Debe ser mayor que la del gráfico: si pones una menor, el rango no tiene sentido.",
+             group = G_RANGE)
+confMode  = input.string("Intra", "Modo de confirmación",
+             options = ["Intra", "3-Velas"],
+             tooltip = "Intra: vale cualquier cierre de vela del gráfico que vuelva dentro del rango. Más señales y antes.\n3-Velas: la siguiente vela HTF completa debe barrer y cerrar de nuevo dentro. Muchas menos señales y más tardías, pero más limpias.",
+             group = G_RANGE)
+
+// ---- ② Filtros de calidad --------------------------------------------------
+minRR       = input.float(1.0, "R:R mínimo para confirmar", minval = 0.0, step = 0.1,
+             tooltip = "Descarta los planes cuya relación Riesgo:Beneficio quede por debajo de este valor. Con 0 no filtra nada.",
+             group = G_FILTER)
+slBufferATR = input.float(0.50, "Colchón del SL (× ATR HTF)", minval = 0.0, step = 0.05,
+             tooltip = "Margen que se añade más allá de la mecha del barrido, medido en múltiplos del ATR de la temporalidad superior.\nOJO: con 0 el stop queda exactamente en la mecha, y si el barrido y la confirmación caen en la misma vela el plan se marca como perdido en el acto.",
+             group = G_FILTER)
+minRangeATR = input.float(0.50, "Tamaño mínimo del rango (× ATR HTF)", minval = 0.0, step = 0.05,
+             tooltip = "Filtra rangos demasiado pequeños. El alto del rango debe superar este múltiplo del ATR de la HTF.",
+             group = G_FILTER)
+oneTrade    = input.bool(true,  "Una operación a la vez",
+             tooltip = "No genera un plan nuevo mientras el anterior siga sin resolverse (operativa secuencial).",
+             group = G_FILTER)
+oneDir      = input.bool(true,  "Una sola dirección por rango",
+             tooltip = "Una vez confirmada una dirección dentro de un rango, ignora la contraria hasta que se abra el rango siguiente.",
+             group = G_FILTER)
+reArm       = input.bool(true,  "Rearmar tras un barrido más profundo",
+             tooltip = "Si el precio hace un barrido más profundo antes de confirmar, mueve el extremo del barrido (y por tanto el stop) al nuevo mínimo o máximo.",
+             group = G_FILTER)
+
+// ---- ③ Ventana de trading --------------------------------------------------
+onlyKZ     = input.bool(true, "Confirmar solo dentro de kill zone",
+             tooltip = "Solo valida señales durante las kill zones de Londres (07:00-10:00) y Nueva York (12:30-15:00), en hora del exchange.",
+             group = G_WINDOW)
+manipOnly  = input.bool(false, "Solo fase de manipulación",
+             tooltip = "AVISO: en esta versión este interruptor no tiene efecto real, porque toda vela del gráfico cae dentro de alguna vela HTF en formación. Se deja visible para no romper los ajustes guardados; ver el MANUAL.",
+             group = G_WINDOW)
+useHour    = input.bool(false, "Solo la vela de una hora concreta",
+             tooltip = "Restringe las confirmaciones a las velas cuya hora de apertura coincide con la hora indicada debajo.",
+             group = G_WINDOW)
+theHour    = input.int(9, "Hora (0-23, hora del exchange)", minval = 0, maxval = 23,
+             tooltip = "Ej.: 9 = apertura de futuros de Nueva York, el modelo clásico en índices.",
+             group = G_WINDOW)
+dailyCap   = input.int(2, "Máximo de señales por día (0 = sin límite)", minval = 0,
+             tooltip = "Corta el número de planes que se pueden generar en una misma sesión diaria.",
+             group = G_WINDOW)
+
+// ---- ④ Niveles adicionales -------------------------------------------------
+showPDHL   = input.bool(false, "PDH / PDL (máximo y mínimo del día previo)",
+             tooltip = "Dibuja el máximo y el mínimo del día anterior ya cerrado. No repintan.",
+             group = G_LEVELS)
+showAsia   = input.bool(false, "Rango de Asia",
+             tooltip = "Dibuja el máximo y el mínimo acumulados de la sesión asiática del día en curso.",
+             group = G_LEVELS)
+asiaStart  = input.session("0000-0800", "Sesión de Asia",
+             tooltip = "Horario de la sesión asiática en hora del exchange.",
+             group = G_LEVELS)
+showKZ     = input.bool(false, "Sombrear kill zones (Londres / Nueva York)",
+             tooltip = "Colorea el fondo del gráfico durante las dos kill zones.",
+             group = G_LEVELS)
+
+// ---- ⑤ Visual --------------------------------------------------------------
+maxHist    = input.int(6, "CRTs históricos en pantalla", minval = 0, maxval = 60,
+             tooltip = "Número máximo de planes antiguos que se mantienen dibujados a la vez. Con 0 no se dibuja ninguno.",
+             group = G_VISUAL)
+showLive   = input.bool(true, "Mostrar la caja del rango vivo",
+             tooltip = "Caja gris discontinua con el rango de la última vela HTF cerrada. Su borde derecho avanza con el precio: es lo único que se mueve dentro de la vela en curso.",
+             group = G_VISUAL)
+showLabels = input.bool(true, "Mostrar etiquetas BUY / SELL / BARRIDO",
+             tooltip = "Etiquetas de dirección, barrido, entrada y niveles SL/TP.",
+             group = G_VISUAL)
+showZones  = input.bool(true, "Mostrar zonas de riesgo y beneficio",
+             tooltip = "Rectángulos de color entre la entrada y el objetivo, y entre la entrada y el stop.",
+             group = G_VISUAL)
+
+colLive    = input.color(color.new(color.gray, 70),   "Rango vivo",       inline = "c1", group = G_VISUAL)
+col50      = input.color(color.new(color.orange, 0),  "Nivel 50 %",       inline = "c1", group = G_VISUAL)
+colBuy     = input.color(color.new(#26a69a, 0),       "BUY",              inline = "c2", group = G_VISUAL)
+colSell    = input.color(color.new(#ef5350, 0),       "SELL",             inline = "c2", group = G_VISUAL)
+colReward  = input.color(color.new(#c8b273, 80),      "Zona de beneficio", inline = "c3", group = G_VISUAL)
+colRisk    = input.color(color.new(color.gray, 80),   "Zona de riesgo",   inline = "c3", group = G_VISUAL)
+colSweep   = input.color(color.new(color.yellow, 0),  "Rombo de BARRIDO", inline = "c4", group = G_VISUAL)
+
+// ---- ⑥ Panel ---------------------------------------------------------------
+showPanel  = input.bool(true, "Mostrar panel de estado",
+             tooltip = "Panel con el estado del rango y dos bloques de estadísticas: patrón (todos los CRT detectados) y operativa (solo los planes que pasan los filtros).\nAVISO IMPORTANTE: si una misma vela toca stop y objetivo, el contador anota el objetivo, porque el orden dentro de la vela no se conoce. El Win% es por tanto optimista y no sustituye a un backtest.",
+             group = G_PANEL)
+panelPos   = input.string("Arriba derecha", "Posición del panel",
+             options = ["Arriba derecha", "Arriba izquierda", "Abajo derecha", "Abajo izquierda"],
+             tooltip = "Esquina del gráfico donde se ancla el panel.",
+             group = G_PANEL)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  2 · DATOS DE LA TEMPORALIDAD SUPERIOR (HTF) — patrón ANTIRREPINTADO
+//
+//  La clave está en pedir la expresión YA DESPLAZADA una vela (high[1], low[1]…)
+//  y activar lookahead_on. Así se obtiene la vela HTF ya cerrada, disponible
+//  desde el primer tick de la HTF en formación y con el mismo valor en histórico
+//  y en tiempo real. Sin el [1], lookahead_on sí traería datos del futuro.
+// ═════════════════════════════════════════════════════════════════════════════
+f_htf(_exp) => request.security(syminfo.tickerid, htf, _exp, lookahead = barmerge.lookahead_on)
+
+htfHigh  = f_htf(high[1])
+htfLow   = f_htf(low[1])
+htfClose = f_htf(close[1])
+htfATR   = f_htf(ta.atr(14)[1])
+htfTime  = f_htf(time)                       // apertura de la vela HTF en curso
+newHTF   = ta.change(htfTime) != 0           // ¿arranca una vela HTF nueva?
+
+// El rango CRT es, literalmente, la última vela HTF cerrada.
+rangeHigh = htfHigh
+rangeLow  = htfLow
+range50   = (rangeHigh + rangeLow) / 2.0
+rangeSize = rangeHigh - rangeLow
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  3 · ESTADO (variables que sobreviven de vela a vela)
+// ═════════════════════════════════════════════════════════════════════════════
+var int    htfStartBar = na      // barra en la que empezó la vela HTF en curso
+var bool   sweptHi     = false   // ¿se barrió la liquidez de arriba?
+var bool   sweptLo     = false   // ¿se barrió la liquidez de abajo?
+var float  sweepHiPx   = na      // mecha del barrido superior
+var float  sweepLoPx   = na      // mecha del barrido inferior
+var bool   dirDone     = false   // ya se confirmó una dirección en este rango
+var int    daySignals  = 0       // señales emitidas hoy
+
+// "Carry": barrido de la vela de manipulación ya cerrada. Solo lo usa 3-Velas.
+var bool   cSweptHi   = false
+var bool   cSweptLo   = false
+var float  cSweepHiPx = na
+var float  cSweepLoPx = na
+var float  cRangeHigh = na
+var float  cRangeLow  = na
+
+// Plan activo
+var bool   inTrade   = false
+var int    tradeDir  = 0         // +1 largo, -1 corto
+var float  tEntry    = na
+var float  tSL       = na
+var float  tTP       = na
+var float  tMid      = na        // 50 % del rango del plan
+var float  tRR       = na        // R:R planificado
+var int    tBar      = na        // barra de la confirmación
+
+// Resultado acumulado de la operativa filtrada, en múltiplos de R
+var float  sumR      = 0.0       // +R por cada objetivo, −1R por cada stop
+
+// Estadísticas de operativa (solo señales que pasan los filtros)
+var int    nSignals  = 0
+var int    nWins     = 0
+var int    nLoss     = 0
+
+// Estadísticas de PATRÓN (todos los CRT, sin filtros de calidad)
+var int    nCRT      = 0         // patrones CRT detectados
+var int    nTouch50  = 0         // cuántos llegaron al 50 %
+var int    nTouchOpp = 0         // cuántos llegaron al extremo opuesto
+var bool   patActive = false     // patrón en curso pendiente de resolver
+var int    patDir    = 0
+var float  patMid    = na
+var float  patOpp    = na
+var bool   patHit50  = false
+var bool   patHitOpp = false
+var bool   patCounted = false    // ya se contó un CRT dentro del rango vivo
+
+// Reinicio diario del contador de señales
+newDay = timeframe.change("1D")
+if newDay
+    daySignals := 0
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  4 · GESTIÓN DEL RANGO EN CURSO
+// ═════════════════════════════════════════════════════════════════════════════
+if newHTF
+    // Congela el estado de barrido de la vela que acaba de cerrar, para 3-Velas.
+    // rangeHigh[1]/rangeLow[1] son el rango que esa vela estaba manipulando:
+    // en esta misma barra rangeHigh ya apunta a la vela recién cerrada.
+    cSweptHi   := sweptHi
+    cSweptLo   := sweptLo
+    cSweepHiPx := sweepHiPx
+    cSweepLoPx := sweepLoPx
+    cRangeHigh := rangeHigh[1]
+    cRangeLow  := rangeLow[1]
+    // Y reinicia el rango vivo.
+    htfStartBar := bar_index
+    sweptHi     := false
+    sweptLo     := false
+    sweepHiPx   := na
+    sweepLoPx   := na
+    dirDone     := false
+    patCounted  := false
+
+// Filtro de tamaño del rango
+rangeOK = rangeSize >= minRangeATR * htfATR
+
+// Filtros de ventana
+hourOK  = not useHour or (hour == theHour)
+capOK   = dailyCap == 0 or daySignals < dailyCap
+
+// Kill zones en hora del exchange: sirven de sombreado y de filtro
+inLDN = not na(time(timeframe.period, "0700-1000"))
+inNY  = not na(time(timeframe.period, "1230-1500"))
+inKZ  = inLDN or inNY
+kzOK  = not onlyKZ or inKZ
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  5 · BARRIDO DE LIQUIDEZ
+//  Se evalúa sobre la vela en curso. Como high y low solo pueden crecer dentro
+//  de la vela, el estado nunca "parpadea": una vez marcado, se queda.
+// ═════════════════════════════════════════════════════════════════════════════
+sweepUp   = high > rangeHigh        // se llevan la liquidez de arriba -> sesgo corto
+sweepDown = low  < rangeLow         // se llevan la liquidez de abajo  -> sesgo largo
+
+if sweepUp
+    if not sweptHi
+        sweptHi   := true
+        sweepHiPx := high
+    else if reArm and high > sweepHiPx
+        sweepHiPx := high           // barrido más profundo -> mueve el extremo
+
+if sweepDown
+    if not sweptLo
+        sweptLo   := true
+        sweepLoPx := low
+    else if reArm and low < sweepLoPx
+        sweepLoPx := low
+
+// Rombo de BARRIDO en el punto exacto. Solo con la vela ya cerrada, para que
+// aparezca una vez y no baile durante la formación.
+plotshape(showLabels and barstate.isconfirmed and (sweepUp and not sweptHi[1]),
+             title = "Barrido superior", style = shape.diamond, location = location.abovebar,
+             color = colSweep, size = size.tiny)
+plotshape(showLabels and barstate.isconfirmed and (sweepDown and not sweptLo[1]),
+             title = "Barrido inferior", style = shape.diamond, location = location.belowbar,
+             color = colSweep, size = size.tiny)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  6 · CONFIRMACIÓN Y CONSTRUCCIÓN DEL PLAN
+// ═════════════════════════════════════════════════════════════════════════════
+// Variables efectivas según el modo:
+//   Intra   -> rango y barridos VIVOS, y el cierre de la vela del gráfico.
+//   3-Velas -> rango y barridos de la vela de manipulación ya cerrada, y su cierre HTF.
+useRH  = confMode == "Intra" ? rangeHigh : cRangeHigh
+useRL  = confMode == "Intra" ? rangeLow  : cRangeLow
+useSH  = confMode == "Intra" ? sweptHi   : cSweptHi
+useSL_ = confMode == "Intra" ? sweptLo   : cSweptLo
+useSHp = confMode == "Intra" ? sweepHiPx : cSweepHiPx
+useSLp = confMode == "Intra" ? sweepLoPx : cSweepLoPx
+useCls = confMode == "Intra" ? close     : htfClose
+
+// "Cierre de vuelta dentro del rango" tras haber barrido un extremo
+closeBackFromLow  = useSL_ and useCls > useRL and useCls <= useRH
+closeBackFromHigh = useSH  and useCls < useRH and useCls >= useRL
+
+// 3-Velas solo se evalúa en la barra donde acaba de cerrar la vela HTF.
+modeOK  = confMode == "Intra" ? true : newHTF
+
+// Puerta de fase de manipulación (ver aviso en el input: hoy siempre es cierta).
+phaseOK = not manipOnly or (not na(htfStartBar))
+
+// ---- Recuento de PATRONES: todos los CRT, sin filtros de calidad ------------
+// Es lo que alimenta las tres primeras estadísticas del panel.
+rawConfirm = barstate.isconfirmed and modeOK and not patCounted
+rawLong    = rawConfirm and closeBackFromLow
+rawShort   = rawConfirm and closeBackFromHigh and not rawLong
+if rawLong or rawShort
+    nCRT       += 1
+    patCounted := true
+    patActive  := true
+    patDir     := rawLong ? 1 : -1
+    patMid     := (useRH + useRL) / 2.0
+    patOpp     := rawLong ? useRH : useRL
+    patHit50   := false
+    patHitOpp  := false
+
+// ---- Valida el R:R y arma el plan -------------------------------------------
+f_makePlan(_dir, _entry, _sweepPx, _rh, _rl) =>
+    _sl   = _dir > 0 ? _sweepPx - slBufferATR * htfATR : _sweepPx + slBufferATR * htfATR
+    _tp   = _dir > 0 ? _rh : _rl
+    _mid  = (_rh + _rl) / 2.0
+    _risk = math.abs(_entry - _sl)
+    _rew  = math.abs(_tp - _entry)
+    _rr   = _risk > 0 ? _rew / _risk : 0.0
+    // Coherencia: la entrada debe caer dentro del rango y del lado correcto de SL y TP.
+    _coher = _entry <= _rh and _entry >= _rl and (_dir > 0 ? (_entry > _sl and _tp > _entry) : (_entry < _sl and _tp < _entry))
+    [_sl, _tp, _mid, _rr, _coher]
+
+canSignal = barstate.isconfirmed and rangeOK and hourOK and capOK and kzOK and modeOK and phaseOK
+                 and (not dirDone or not oneDir) and (not inTrade or not oneTrade)
+
+longSignal  = false
+shortSignal = false
+
+if canSignal and closeBackFromLow
+    [sl, tp, mid, rr, coher] = f_makePlan(1, useCls, useSLp, useRH, useRL)
+    if rr >= minRR and coher
+        longSignal := true
+        tradeDir   := 1
+        tEntry     := useCls
+        tSL        := sl
+        tTP        := tp
+        tMid       := mid
+        tRR        := rr
+        tBar       := bar_index
+
+if canSignal and closeBackFromHigh and not longSignal
+    [sl, tp, mid, rr, coher] = f_makePlan(-1, useCls, useSHp, useRH, useRL)
+    if rr >= minRR and coher
+        shortSignal := true
+        tradeDir    := -1
+        tEntry      := useCls
+        tSL         := sl
+        tTP         := tp
+        tMid        := mid
+        tRR         := rr
+        tBar        := bar_index
+
+newSignal = longSignal or shortSignal
+if newSignal
+    inTrade    := true
+    dirDone    := true
+    nSignals   += 1
+    daySignals += 1
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  7 · RESOLUCIÓN DEL PLAN Y ESTADÍSTICAS
+// ═════════════════════════════════════════════════════════════════════════════
+// --- Patrón: seguimiento del CRT en curso, sin filtros ---
+if patActive and barstate.isconfirmed
+    if not patHit50 and ((patDir > 0 and high >= patMid) or (patDir < 0 and low <= patMid))
+        patHit50 := true
+        nTouch50 += 1
+    if not patHitOpp and ((patDir > 0 and high >= patOpp) or (patDir < 0 and low <= patOpp))
+        patHitOpp := true
+        nTouchOpp += 1
+        patActive := false        // llegó al extremo opuesto -> patrón resuelto
+
+// --- Plan operable: marca ✓TP / ✗SL cuando se resuelve ---
+// Si una misma vela toca los dos niveles se anota el objetivo, porque el orden
+// dentro de la vela no se conoce. Lo advierte el tooltip del panel.
+tradeResolved = 0                 // 0 nada · 1 objetivo · -1 stop
+if inTrade and barstate.isconfirmed
+    hitTP = (tradeDir > 0 and high >= tTP) or (tradeDir < 0 and low <= tTP)
+    hitSL = (tradeDir > 0 and low  <= tSL) or (tradeDir < 0 and high >= tSL)
+    if hitTP
+        nWins         += 1
+        sumR          += nz(tRR, 0.0)   // gana el R:R que tenía planificado
+        inTrade       := false
+        tradeResolved := 1
+    else if hitSL
+        nLoss         += 1
+        sumR          -= 1.0            // pierde 1R
+        inTrade       := false
+        tradeResolved := -1
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  8 · DIBUJO
+// ═════════════════════════════════════════════════════════════════════════════
+// ---- Caja del rango vivo y línea del 50 % ----------------------------------
+// Se borra y se vuelve a crear en cada barra: es el único elemento que avanza
+// con el precio dentro de la vela en formación.
+var box  liveBox = na
+var line live50  = na
+if showLive
+    box.delete(liveBox)
+    line.delete(live50)
+    liveBox := box.new(nz(htfStartBar, bar_index), rangeHigh, bar_index, rangeLow,
+             border_color = colLive, border_style = line.style_dashed,
+             bgcolor = color.new(colLive, 92))
+    live50  := line.new(nz(htfStartBar, bar_index), range50, bar_index, range50,
+             color = col50, style = line.style_dotted, width = 1)
+
+// ---- Etiquetas y zonas. Se guardan en arrays para poder recortar el histórico.
+var array<label> sigLabels = array.new<label>()
+var array<box>   zoneBoxes = array.new<box>()
+
+colTPlbl  = color.new(#c8b273, 15)
+colGrylbl = color.new(color.gray, 20)
+
+if newSignal
+    isLong  = longSignal
+    // Reconstruye la mecha del barrido deshaciendo el colchón del stop.
+    sweepPx = isLong ? tSL + slBufferATR * htfATR : tSL - slBufferATR * htfATR
+    stUp    = isLong ? label.style_label_up : label.style_label_down
+    if showLabels
+        // Etiqueta de dirección del CRT, anclada al inicio del rango
+        dl = label.new(nz(htfStartBar, bar_index), isLong ? rangeLow : rangeHigh,
+             "CRT " + (isLong ? "ALCISTA ▲ " : "BAJISTA ▼ ") + htf,
+             color = colGrylbl, textcolor = color.white, style = stUp, size = size.small)
+        // BARRIDO, sobre la mecha
+        bl = label.new(bar_index, sweepPx, "BARRIDO",
+             color = colGrylbl, textcolor = color.white, style = stUp, size = size.tiny)
+        // BUY / SELL
+        sg = label.new(bar_index, sweepPx, isLong ? "BUY" : "SELL",
+             color = isLong ? colBuy : colSell, textcolor = color.white, style = stUp, size = size.small)
+        // Niveles SL y TP con su precio, arrancando en la vela siguiente
+        sll = label.new(bar_index + 1, tSL, "SL " + str.tostring(tSL, format.mintick),
+             color = colGrylbl, textcolor = color.white, style = label.style_label_left, size = size.small)
+        tpl = label.new(bar_index + 1, tTP, "TP " + str.tostring(tTP, format.mintick),
+             color = colTPlbl, textcolor = color.white, style = label.style_label_left, size = size.small)
+        array.push(sigLabels, dl)
+        array.push(sigLabels, bl)
+        array.push(sigLabels, sg)
+        array.push(sigLabels, sll)
+        array.push(sigLabels, tpl)
+    if showZones
+        rightX = bar_index + 30
+        bRew  = box.new(bar_index + 1, tEntry, rightX, tTP, border_color = na, bgcolor = colReward)
+        bRisk = box.new(bar_index + 1, tEntry, rightX, tSL, border_color = na, bgcolor = colRisk)
+        array.push(zoneBoxes, bRew)
+        array.push(zoneBoxes, bRisk)
+
+// Marca ✓TP / ✗SL en el momento en que el plan se resuelve
+if showLabels and tradeResolved != 0
+    rl = label.new(bar_index, tradeResolved == 1 ? tTP : tSL,
+             tradeResolved == 1 ? "✓ TP" : "✗ SL",
+             color     = tradeResolved == 1 ? color.new(color.green, 15) : color.new(color.red, 15),
+             textcolor = color.white, style = label.style_label_left, size = size.small)
+    array.push(sigLabels, rl)
+
+// Recorta los setups antiguos por encima del máximo configurado.
+while array.size(sigLabels) > maxHist * 6
+    label.delete(array.shift(sigLabels))
+while array.size(zoneBoxes) > maxHist * 2
+    box.delete(array.shift(zoneBoxes))
+
+// ---- Niveles adicionales ---------------------------------------------------
+// Mismo patrón antirrepintado que el rango: día previo YA cerrado.
+pdh = request.security(syminfo.tickerid, "1D", high[1], lookahead = barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "1D", low[1],  lookahead = barmerge.lookahead_on)
+plot(showPDHL ? pdh : na, "PDH", color = color.new(color.blue, 0), style = plot.style_linebr)
+plot(showPDHL ? pdl : na, "PDL", color = color.new(color.blue, 0), style = plot.style_linebr)
+
+inAsia = not na(time(timeframe.period, asiaStart))
+var float asiaHi = na
+var float asiaLo = na
+if showAsia
+    if inAsia and not inAsia[1]
+        asiaHi := high              // primera vela de la sesión: reinicia
+        asiaLo := low
+    else if inAsia
+        asiaHi := math.max(asiaHi, high)
+        asiaLo := math.min(asiaLo, low)
+plot(showAsia ? asiaHi : na, "Máximo de Asia", color = color.new(color.purple, 0), style = plot.style_linebr)
+plot(showAsia ? asiaLo : na, "Mínimo de Asia", color = color.new(color.purple, 0), style = plot.style_linebr)
+
+bgcolor(showKZ and inLDN ? color.new(color.blue,   92) : na, title = "KZ Londres")
+bgcolor(showKZ and inNY  ? color.new(color.orange, 92) : na, title = "KZ Nueva York")
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  9 · PANEL DE ESTADO Y ESTADÍSTICAS
+// ═════════════════════════════════════════════════════════════════════════════
+f_pos() =>
+    switch panelPos
+        "Arriba derecha"   => position.top_right
+        "Arriba izquierda" => position.top_left
+        "Abajo derecha"    => position.bottom_right
+        => position.bottom_left
+
+var table panel = table.new(f_pos(), 2, 14, border_width = 1,
+             frame_color = color.new(color.gray, 50), frame_width = 1)
+
+f_row(_i, _k, _v, _c) =>
+    table.cell(panel, 0, _i, _k, text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, _i, _v, text_color = _c,         text_size = size.small, text_halign = text.align_right)
+
+f_lvl(_i, _k, _v, _c) =>
+    table.cell(panel, 0, _i, _k, text_color = _c,          text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, _i, _v, text_color = color.white, text_size = size.small, text_halign = text.align_right)
+
+if showPanel and barstate.islast
+    swept = sweptHi or sweptLo
+    state = inTrade ? "CRT confirmado" : (swept ? "Barrido" : "Esperando")
+    ahora = inTrade ? "gestionar el plan" : (swept ? "esperar cierre dentro" : "esperar barrido")
+    stCol = inTrade ? color.lime : (swept ? color.orange : color.gray)
+    // El 100.0 va delante a propósito: en Pine, int/int es división ENTERA y
+    // nTouch50/nCRT daría siempre 0 o 1, es decir 0 % o 100 %.
+    p50   = nCRT > 0 ? 100.0 * nTouch50  / nCRT : 0.0
+    pOpp  = nCRT > 0 ? 100.0 * nTouchOpp / nCRT : 0.0
+    table.cell(panel, 0, 0, "CRT PLANNER", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.normal, text_halign = text.align_left)
+    table.cell(panel, 1, 0, htf + " · " + confMode, text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.normal, text_halign = text.align_right)
+    f_lvl(1, "● Máximo", str.tostring(rangeHigh, format.mintick), #ec407a)
+    f_lvl(2, "● 50 %",   str.tostring(range50,   format.mintick), color.orange)
+    f_lvl(3, "● Mínimo", str.tostring(rangeLow,  format.mintick), color.new(color.blue, 0))
+    f_row(4, "Estado", state, stCol)
+    f_row(5, "Ahora",  ahora, color.silver)
+    f_row(6, "CRTs",   str.tostring(nCRT), color.white)
+    f_row(7, "→ 50 %", str.tostring(p50,  "0.0") + "% (" + str.tostring(nTouch50)  + ")", color.orange)
+    f_row(8, "→ TP",   str.tostring(pOpp, "0.0") + "% (" + str.tostring(nTouchOpp) + ")", color.aqua)
+    // --- Bloque de operativa: solo señales que pasaron los filtros ---
+    resolved = nWins + nLoss
+    wr       = resolved > 0 ? 100.0 * nWins / resolved : 0.0
+    posCol   = color.lime
+    negCol   = #ef5350
+    wrCol    = resolved == 0 ? color.gray : (wr >= 50 ? posCol : negCol)
+    resCol   = sumR > 0 ? posCol : (sumR < 0 ? negCol : color.gray)
+    resTxt   = (sumR >= 0 ? "+" : "") + str.tostring(sumR, "0.00") + "R"
+    rrTxt    = na(tRR) ? "—" : str.tostring(tRR, "0.00")
+    table.cell(panel, 0, 9, "OPERABLE", text_color = color.white, bgcolor = color.new(color.gray, 40), text_size = size.small, text_halign = text.align_left)
+    table.cell(panel, 1, 9, str.tostring(nSignals), text_color = color.white, bgcolor = color.new(color.gray, 40), text_size = size.small, text_halign = text.align_right)
+    f_row(10, "Win% (TP)",      str.tostring(wr, "0.0") + "%", wrCol)
+    f_row(11, "Ganadas/Perd.",  str.tostring(nWins) + " / " + str.tostring(nLoss), color.white)
+    f_row(12, "R:R del plan",   rrTxt, color.silver)
+    f_row(13, "Resultado",      resTxt, resCol)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  10 · ALERTAS
+//  Todas se disparan al cierre de la vela, nunca dentro de la vela en curso.
+// ═════════════════════════════════════════════════════════════════════════════
+alertcondition(longSignal,  title = "CRT alcista confirmado", message = "CRT alcista confirmado en {{ticker}} ({{interval}}). Entrada, SL y TP en el gráfico.")
+alertcondition(shortSignal, title = "CRT bajista confirmado", message = "CRT bajista confirmado en {{ticker}} ({{interval}}). Entrada, SL y TP en el gráfico.")
+alertcondition(newSignal,   title = "CRT confirmado (cualquiera)", message = "Nuevo plan CRT confirmado en {{ticker}} ({{interval}}).")
+
+if longSignal
+    alert("CRT BUY " + syminfo.ticker + " @ " + str.tostring(tEntry, format.mintick) +
+             " | SL " + str.tostring(tSL, format.mintick) + " | TP " + str.tostring(tTP, format.mintick), alert.freq_once_per_bar_close)
+if shortSignal
+    alert("CRT SELL " + syminfo.ticker + " @ " + str.tostring(tEntry, format.mintick) +
+             " | SL " + str.tostring(tSL, format.mintick) + " | TP " + str.tostring(tTP, format.mintick), alert.freq_once_per_bar_close)

@@ -1,0 +1,16 @@
+# Copias de seguridad y material archivado (no se publican)
+_backup_*/
+_archivo/
+
+# Basura del sistema / temporales
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*~
+
+# Config local del preview (no se publica)
+.claude/
+
+# Informes de este repaso: para ti, no para publicarlos en la web
+_informe/

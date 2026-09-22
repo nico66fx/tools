@@ -1,0 +1,88 @@
+# CRT Trade Planner — Manual
+
+© nico66fx · Pine Script v6 · TradingView
+
+---
+
+## Qué hace, en tres líneas
+
+1. Coge la última vela **ya cerrada** de una temporalidad superior (por defecto H4) y la convierte en un rango: máximo, mínimo y 50 %.
+2. Espera a que el precio **barra** uno de los dos extremos y **cierre de vuelta dentro** del rango.
+3. Cuando eso pasa, dibuja el plan completo —entrada, stop, objetivo y R:R— y lleva la cuenta en un panel.
+
+---
+
+## Cómo instalarlo en TradingView, paso a paso
+
+1. Abre cualquier gráfico en **tradingview.com**.
+2. En la barra inferior pulsa **Editor Pine** (si no lo ves: menú superior → *Ver* → *Editor Pine*).
+3. En el editor: **Abrir → Nuevo indicador en blanco**.
+4. Selecciona todo el código de ejemplo que aparece (`Ctrl+A` / `Cmd+A`) y bórralo.
+5. Abre el archivo `CRT_Trade_Planner_nico66fx.pine` con cualquier editor de texto, cópialo **entero** y pégalo.
+6. Pulsa **Guardar**, ponle el nombre que quieras y confirma.
+7. Pulsa **Añadir al gráfico**.
+8. Para configurarlo: doble clic sobre el nombre del indicador en la esquina superior izquierda del gráfico, o el icono del engranaje.
+9. Si quieres tenerlo siempre a mano: en la lista de indicadores, pestaña **Mis scripts**, marca la estrella.
+
+> Si al pegar sale un error, no lo toques: mira el `CHECKLIST.md` de la raíz del pack, que te dice qué comprobar y en qué orden.
+
+---
+
+## Los 3 ajustes que hay que tocar primero
+
+### 1 · Temporalidad del rango *(grupo ① Rango)*
+Es **el** ajuste del indicador. Define de qué vela sale el rango CRT.
+Tiene que ser **mayor** que la del gráfico; si pones una igual o menor, el rango no tiene sentido y el indicador no dibujará nada coherente.
+Combinaciones que funcionan bien:
+
+| Gráfico | Temporalidad del rango |
+|---------|------------------------|
+| M5      | 60 (H1)                |
+| M15     | 240 (H4) ← por defecto |
+| H1      | D (diario)             |
+| H4      | W (semanal)            |
+
+### 2 · Modo de confirmación *(grupo ① Rango)*
+- **Intra** (por defecto): vale cualquier vela del gráfico que cierre de vuelta dentro del rango. Más señales y antes.
+- **3-Velas**: exige que la siguiente vela completa de la temporalidad superior barra y cierre de nuevo dentro. Muchísimas menos señales, más tardías, pero más limpias.
+
+Empieza en **Intra** para ver cómo se comporta el activo, y pásate a **3-Velas** si te salen demasiadas señales de baja calidad.
+
+### 3 · Confirmar solo dentro de kill zone *(grupo ③ Ventana de trading)*
+Viene **activado**. Solo valida señales durante Londres (07:00-10:00) y Nueva York (12:30-15:00), en **hora del exchange**, no la tuya.
+
+Es la causa número uno de "no me sale ninguna señal". Si operas fuera de esas franjas, o el activo que miras no las respeta (cripto, por ejemplo), **desactívalo**.
+
+**Un cuarto que conviene mirar:** *Colchón del SL (× ATR HTF)*. Con 0 el stop queda clavado en la mecha del barrido, y si el barrido y la confirmación caen en la misma vela el plan se marca como perdido en el acto. Déjalo en 0,50 salvo que sepas por qué lo bajas.
+
+---
+
+## Dónde tiene sentido usarlo
+
+**Mercados.** Es un marco de Candle Range Theory, así que va donde va el concepto: índices (NAS100, US500, GER40), pares mayores de forex, oro y BTC. Cuanto más líquido y con horarios más marcados, mejor se comporta el filtro de kill zone.
+
+**Temporalidades.** El gráfico entre **M5 y H1**, con la temporalidad del rango dos o tres escalones por encima (ver la tabla de arriba). Por debajo de M5 el ruido se come el patrón; por encima de H1 tendrás muy pocas señales como para sacar conclusiones.
+
+**Cuándo no.** Activos ilíquidos, acciones de poco volumen y temporalidades por debajo de M1: el barrido deja de significar nada.
+
+---
+
+## Repintado
+
+**NO REPINTA.**
+
+El rango sale siempre de la vela de temporalidad superior **ya cerrada** (`request.security` con la expresión desplazada `[1]` y `lookahead_on`), y todas las señales se validan con `barstate.isconfirmed`, es decir, solo sobre velas cerradas del gráfico. Las alertas se disparan con `alert.freq_once_per_bar_close`.
+
+Lo único que se mueve dentro de la vela en formación es la **caja gris del rango vivo** —su borde derecho avanza con el precio— y el **panel de estado**. Ninguna flecha, ningún BUY/SELL, ningún SL y ningún TP se recolocan una vez dibujados.
+
+---
+
+## Qué NO hace
+
+- **No es una estrategia automática.** No envía órdenes, no calcula tamaño de posición y no gestiona nada una vez abierta la operación.
+- **El panel no es un backtest.** Si una misma vela toca el stop y el objetivo, el contador anota el objetivo, porque el orden dentro de la vela no se conoce. El Win% que ves es por tanto **optimista**. Sirve para hacerte una idea del comportamiento del patrón en ese activo, no para validar nada.
+- **Las estadísticas de patrón (`CRTs`, `→ 50 %`, `→ TP`) se cuentan desde la vela de confirmación incluida.** Si esa misma vela ya llegó al 50 % o al objetivo, se cuenta como alcanzado. Vuelve a inclinar los números a favor.
+- **Además, si aparece un CRT nuevo antes de que el anterior se haya resuelto, el anterior deja de seguirse** y cuenta como no alcanzado. Los porcentajes son, por ese lado, conservadores.
+- **No predice nada.** Marca un plan cuando se da el patrón. Que el precio lo respete es otra historia.
+- **El ajuste "Solo fase de manipulación" no hace nada en esta versión.** Está a la vista para no romper configuraciones guardadas, y su tooltip lo dice. Actívalo o desactívalo, da igual: el resultado es el mismo.
+- **No sustituye tu criterio de contexto.** No sabe si hay noticias, si el rango es un lateral de vacaciones o si estás en medio de una tendencia brutal.

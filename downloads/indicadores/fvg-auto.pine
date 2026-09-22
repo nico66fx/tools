@@ -1,0 +1,190 @@
+// =====================================================================
+//  FVG Auto  ·  Fair Value Gaps automáticos para TradingView
+//  Pine Script v6
+// ---------------------------------------------------------------------
+//  QUÉ HACE
+//   · Detecta Fair Value Gaps de 3 velas en el timeframe del gráfico.
+//   · Dibuja cada FVG como una caja que se extiende hacia la derecha
+//     mientras el precio no la haya visitado.
+//   · Cuando el precio toca el 50 % de la zona (Consequent Encroachment)
+//     la marca como mitigada: la pinta en gris, deja de extenderla y
+//     dibuja la línea del 50 %.
+//   · Cuando el precio la rellena por completo, la borra (opcional).
+//
+//  NO REPINTA
+//   Toda la detección se hace sobre velas YA CERRADAS. La vela en
+//   formación (índice 0) no se lee en ningún sitio: el patrón se evalúa
+//   con los índices [1], [2] y [3], así que la vela más reciente que
+//   toca el indicador es la última que ya cerró. Una caja que aparece
+//   no se mueve ni desaparece luego. Explicación larga en el README.
+//
+//  AVISO
+//   Es una herramienta de análisis: marca desequilibrios de precio.
+//   No es una señal de compra ni de venta. Pruébalo en demo.
+// =====================================================================
+
+//@version=6
+indicator("FVG Auto", shorttitle = "FVG Auto", overlay = true, max_boxes_count = 500, max_lines_count = 500)
+
+// ---------------------------------------------------------------------
+//  ENTRADAS
+// ---------------------------------------------------------------------
+const string G_TAM = "Filtro de tamaño"
+const string G_GES = "Gestión de las cajas"
+const string G_VIS = "Aspecto"
+const string G_KZ  = "Filtro por killzone"
+
+// -- Tamaño mínimo, en múltiplos de ATR, para no dibujar ruido --------
+int   atrLargo  = input.int(14, "Longitud del ATR", minval = 1, group = G_TAM,
+     tooltip = "El ATR se lee de la última vela cerrada, no de la que está en curso.")
+float factorATR = input.float(0.25, "Tamaño mínimo de la FVG (× ATR)", minval = 0.0, step = 0.05, group = G_TAM,
+     tooltip = "0.25 quiere decir: solo dibujo la FVG si su altura llega a un cuarto del ATR(14). Súbelo para ver menos cajas.")
+
+// -- Cuántas cajas se mantienen y qué pasa al rellenarse ---------------
+int  maxCajas    = input.int(20, "Máximo de cajas visibles", minval = 1, maxval = 200, group = G_GES,
+     tooltip = "Al superar este número se borra la más antigua. Evita chocar con el límite de 500 de TradingView.")
+bool borrarLlena = input.bool(true, "Borrar la caja cuando se rellena del todo", group = G_GES)
+
+// -- Colores, cada uno con su transparencia ----------------------------
+color colAlcista  = input.color(#199e70, "Alcista",  group = G_VIS, inline = "alc")
+int   traAlcista  = input.int(84, "Transp.", minval = 0, maxval = 100, group = G_VIS, inline = "alc")
+color colBajista  = input.color(#e66767, "Bajista",  group = G_VIS, inline = "baj")
+int   traBajista  = input.int(84, "Transp.", minval = 0, maxval = 100, group = G_VIS, inline = "baj")
+color colMitigada = input.color(#8c8b82, "Mitigada", group = G_VIS, inline = "mit")
+int   traMitigada = input.int(90, "Transp.", minval = 0, maxval = 100, group = G_VIS, inline = "mit")
+bool  mostrarL50  = input.bool(true, "Dibujar la línea del 50 % al mitigarse", group = G_VIS)
+
+// -- Killzones ---------------------------------------------------------
+bool   usarKZ    = input.bool(false, "Solo FVG creadas dentro de killzone", group = G_KZ)
+string zonaHorar = input.string("America/New_York", "Zona horaria", group = G_KZ,
+     tooltip = "Las dos ventanas de abajo se interpretan en ESTA zona horaria. Lee el README: con America/New_York, 0800-1100 NO es la killzone de Londres clásica.")
+string sesLondres = input.string("0800-1100", "Ventana 1 (Londres)", group = G_KZ,
+     tooltip = "Formato HHMM-HHMM. Para incluir fines de semana en cripto, añade :1234567")
+string sesNuevaY  = input.string("0930-1130", "Ventana 2 (Nueva York)", group = G_KZ)
+
+// ---------------------------------------------------------------------
+//  TIPO QUE GUARDA CADA FVG
+//  Un objeto por hueco: su caja, su línea del 50 % y su estado.
+// ---------------------------------------------------------------------
+type FVG
+    box   caja
+    line  linea
+    float techo
+    float suelo
+    float medio
+    bool  alcista
+    bool  mitigada
+
+var array<FVG> huecos = array.new<FVG>()
+
+// ---------------------------------------------------------------------
+//  REFERENCIAS SOBRE VELA CERRADA
+//  C3 = [1] es la vela que abre el hueco y ya ha cerrado.
+//  C2 = [2] es la vela de desplazamiento.
+//  C1 = [3] es la primera del patrón.
+//  El índice [0] (vela en curso) no se usa NUNCA.
+// ---------------------------------------------------------------------
+float atrRef = ta.atr(atrLargo)[1]
+bool  atrOK  = not na(atrRef)
+bool  hayVelas = bar_index > 3
+
+// Killzone: se mira la ventana en la que cerró C3, no la actual.
+bool enLondres = not na(time(timeframe.period, sesLondres, zonaHorar))
+bool enNuevaY  = not na(time(timeframe.period, sesNuevaY,  zonaHorar))
+bool enKZahora = enLondres or enNuevaY
+bool kzOK      = not usarKZ or enKZahora[1]
+
+// Geometría de los dos huecos posibles.
+// Alcista: low[1] > high[3]  ->  zona de high[3] (suelo) a low[1] (techo)
+// Bajista: high[1] < low[3]  ->  zona de high[1] (suelo) a low[3] (techo)
+float techoAlc = low[1]
+float sueloAlc = high[3]
+float techoBaj = low[3]
+float sueloBaj = high[1]
+
+// nz() evita que el umbral quede en na durante las primeras velas del
+// gráfico, cuando el ATR todavía no tiene datos suficientes. El na se
+// filtra aparte con atrOK, así que ningún operando del and llega en na.
+float umbral = factorATR * nz(atrRef, 0.0)
+
+bool hayAlcista = hayVelas and atrOK and kzOK and low[1]  > high[3] and (techoAlc - sueloAlc) >= umbral
+bool hayBajista = hayVelas and atrOK and kzOK and high[1] < low[3]  and (techoBaj - sueloBaj) >= umbral
+
+// ---------------------------------------------------------------------
+//  1 · CREAR LA CAJA DE UNA FVG NUEVA
+//  La caja arranca en C2 (bar_index - 2), que es la vela de
+//  desplazamiento, y se extiende hasta la barra actual.
+// ---------------------------------------------------------------------
+if hayAlcista
+    box bAlc = box.new(bar_index - 2, techoAlc, bar_index, sueloAlc,
+         border_color = color.new(colAlcista, math.max(0, traAlcista - 30)),
+         border_width = 1,
+         bgcolor      = color.new(colAlcista, traAlcista))
+    // El campo linea no se pasa: arranca en na y solo se crea si la
+    // caja llega a mitigarse.
+    array.push(huecos, FVG.new(caja = bAlc, techo = techoAlc, suelo = sueloAlc,
+         medio = (techoAlc + sueloAlc) / 2.0, alcista = true, mitigada = false))
+
+if hayBajista
+    box bBaj = box.new(bar_index - 2, techoBaj, bar_index, sueloBaj,
+         border_color = color.new(colBajista, math.max(0, traBajista - 30)),
+         border_width = 1,
+         bgcolor      = color.new(colBajista, traBajista))
+    array.push(huecos, FVG.new(caja = bBaj, techo = techoBaj, suelo = sueloBaj,
+         medio = (techoBaj + sueloBaj) / 2.0, alcista = false, mitigada = false))
+
+// ---------------------------------------------------------------------
+//  2 · RECORTAR AL MÁXIMO
+//  Si sobran cajas se borra siempre la más antigua (la primera del array).
+// ---------------------------------------------------------------------
+while array.size(huecos) > maxCajas
+    FVG viejo = array.shift(huecos)
+    box.delete(viejo.caja)
+    if not na(viejo.linea)
+        line.delete(viejo.linea)
+
+// ---------------------------------------------------------------------
+//  3 · ACTUALIZAR LAS CAJAS VIVAS
+//  Se recorre de atrás hacia delante para poder borrar sin descuadrar
+//  los índices. El guard del size evita el bucle al revés cuando el
+//  array está vacío.
+// ---------------------------------------------------------------------
+bool huboMitigacion = false
+
+if array.size(huecos) > 0
+    for i = array.size(huecos) - 1 to 0
+        FVG f = array.get(huecos, i)
+
+        // Mientras no esté mitigada, la caja sigue creciendo a la derecha.
+        if not f.mitigada
+            box.set_right(f.caja, bar_index)
+
+            // ¿Ha tocado el 50 %? Se comprueba con la última vela cerrada.
+            bool tocaMedio = f.alcista ? low[1] <= f.medio : high[1] >= f.medio
+            if tocaMedio
+                f.mitigada := true
+                huboMitigacion := true
+                box.set_bgcolor(f.caja, color.new(colMitigada, traMitigada))
+                box.set_border_color(f.caja, color.new(colMitigada, math.max(0, traMitigada - 30)))
+                if mostrarL50
+                    f.linea := line.new(box.get_left(f.caja), f.medio, bar_index, f.medio,
+                         color = color.new(colMitigada, math.max(0, traMitigada - 45)),
+                         style = line.style_dashed, width = 1)
+
+        // ¿Rellenada del todo? Alcista: el precio ha bajado por debajo
+        // del suelo. Bajista: ha subido por encima del techo.
+        bool rellena = f.alcista ? low[1] <= f.suelo : high[1] >= f.techo
+        if rellena and borrarLlena
+            box.delete(f.caja)
+            if not na(f.linea)
+                line.delete(f.linea)
+            array.remove(huecos, i)
+
+// ---------------------------------------------------------------------
+//  4 · ALERTAS
+//  Las tres condiciones se calculan sobre vela cerrada, así que la
+//  alerta salta una sola vez y no se retracta.
+// ---------------------------------------------------------------------
+alertcondition(hayAlcista,      title = "Nueva FVG alcista", message = "FVG Auto: nueva FVG alcista")
+alertcondition(hayBajista,      title = "Nueva FVG bajista", message = "FVG Auto: nueva FVG bajista")
+alertcondition(huboMitigacion,  title = "FVG mitigada",      message = "FVG Auto: una FVG ha llegado a su 50 %")

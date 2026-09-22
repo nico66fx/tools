@@ -1,0 +1,243 @@
+//@version=6
+// =============================================================================
+//  HEATMAP STOPHUNTER
+//  Mapa de liquidez y cazas de stops. Dibuja los focos de liquidez (stops de
+//  compradores sobre los maximos, de vendedores bajo los minimos) como bandas
+//  extendidas, coloreadas por RANGO de fuerza (rosa = mas fuerte en pantalla),
+//  proyecta hasta donde suele llegar un barrido (tipico y extremo 1-de-20) y
+//  marca su estado: barrido y recuperado, roto, o rotura confirmandose.
+// =============================================================================
+indicator("HEATMAP STOPHUNTER", shorttitle="H STOPHUNT", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=5000)
+
+// -----------------------------------------------------------------------------
+//  ENTRADAS
+// -----------------------------------------------------------------------------
+grpDet   = "Deteccion"
+pivotLen = input.int(15,  "Sensibilidad de pivotes", minval=2, maxval=100, group=grpDet, tooltip="Barras a izquierda/derecha para validar un swing. Mayor = focos mas relevantes.")
+maxLevels= input.int(5,   "Focos por lado", minval=1, maxval=15, group=grpDet, tooltip="Cuantos maximos/minimos sin barrer se mantienen a la vez por lado.")
+useBody  = input.bool(true,"Barrido = cierre recuperado", group=grpDet, tooltip="Para contar 'barrido y recuperado' el cierre debe volver al lado seguro del nivel.")
+
+grpStr   = "Fuerza / proyeccion"
+atrLen   = input.int(14,  "Longitud ATR", minval=1, group=grpStr)
+minPen   = input.float(0.05,"Penetracion minima (x ATR)", minval=0.0, step=0.05, group=grpStr, tooltip="La mecha debe superar el nivel al menos esta fraccion de ATR para contar como barrido.")
+typDef   = input.float(0.5, "Barrido tipico por defecto (x ATR)", minval=0.05, step=0.05, group=grpStr, tooltip="Proyeccion tipica usada hasta tener muestras suficientes.")
+extDef   = input.float(1.2, "Barrido extremo por defecto (x ATR)", minval=0.1, step=0.05, group=grpStr, tooltip="Proyeccion 1-de-20 usada hasta tener muestras suficientes.")
+
+grpVis   = "Visual"
+bandAtr  = input.float(0.10,"Grosor de banda (x ATR)", minval=0.01, step=0.01, group=grpVis)
+rightPad = input.int(18,  "Extension a la derecha (barras)", minval=0, maxval=100, group=grpVis)
+showProj = input.bool(true,"Mostrar proyeccion de barrido", group=grpVis)
+showMark = input.bool(true,"Mostrar marcadores de estado", group=grpVis)
+showLegend=input.bool(true,"Mostrar leyenda", group=grpVis)
+colWeak  = input.color(#26a69a, "Foco debil (rango bajo)", group=grpVis)
+colStrong= input.color(#ff2e93, "Foco fuerte (rango alto)", group=grpVis)
+
+grpPanel = "Radar (recuento)"
+showPanel= input.bool(true,"Mostrar panel", group=grpPanel)
+lookback = input.int(300, "Ventana de recuento (barras)", minval=20, group=grpPanel)
+
+// -----------------------------------------------------------------------------
+//  ESTADO
+// -----------------------------------------------------------------------------
+atr = ta.atr(atrLen)
+half = bandAtr * atr * 0.5
+
+type Liq
+    float price
+    int   bar
+    bool  isHigh
+    float strength   // proxy de liquidez (volumen / rango en el pivote)
+
+var array<Liq>   highs = array.new<Liq>()   // buy-side (stops de compradores)
+var array<Liq>   lows  = array.new<Liq>()   // sell-side (stops de vendedores)
+var array<float> pens  = array.new<float>() // muestras de penetracion (en ATR) para proyectar
+
+// recuento para el panel
+var array<int> huntBuy  = array.new<int>()
+var array<int> huntSell = array.new<int>()
+
+// handles de dibujo que se rehacen en la ultima barra
+var array<box>   dynBox  = array.new<box>()
+var array<line>  dynLine = array.new<line>()
+var array<label> dynLbl  = array.new<label>()
+
+bool bearHunt = false
+bool bullHunt = false
+
+// -----------------------------------------------------------------------------
+//  NUEVOS FOCOS DE LIQUIDEZ (pivotes)
+// -----------------------------------------------------------------------------
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low,  pivotLen, pivotLen)
+
+f_strengthAt(int back) =>
+    v = volume[back]
+    rng = math.abs(high[back] - low[back])
+    na(v) or v == 0 ? rng : v
+
+f_push(array<Liq> arr, float px, bool isHigh) =>
+    arr.push(Liq.new(px, bar_index - pivotLen, isHigh, f_strengthAt(pivotLen)))
+    while arr.size() > maxLevels
+        arr.shift()
+
+if not na(ph)
+    f_push(highs, ph, true)
+if not na(pl)
+    f_push(lows, pl, false)
+
+// -----------------------------------------------------------------------------
+//  INTERACCION: barrido&recuperado (⚡) o rotura (✕)
+// -----------------------------------------------------------------------------
+f_marker(float px, bool isHigh, string txt, color col, bool up) =>
+    if showMark
+        label.new(bar_index, isHigh ? high : low, txt, yloc = up ? yloc.abovebar : yloc.belowbar, style = up ? label.style_label_down : label.style_label_up, color = col, textcolor = color.white, size = size.small)
+
+// maximos (buy-side)
+if highs.size() > 0
+    i = highs.size() - 1
+    while i >= 0
+        lq  = highs.get(i)
+        pen = high - lq.price
+        if high > lq.price and pen >= minPen * atr
+            reclaimed = not useBody or close < lq.price
+            if reclaimed
+                f_marker(lq.price, true, "⚡ " + str.tostring(pen / atr, "0.0") + " ATR", colStrong, true)
+                pens.push(pen / atr)
+                huntBuy.push(bar_index)
+                bearHunt := true
+            else
+                f_marker(lq.price, true, "✕", color.new(color.gray, 0), true)
+            highs.remove(i)
+        i -= 1
+
+// minimos (sell-side)
+if lows.size() > 0
+    j = lows.size() - 1
+    while j >= 0
+        lq  = lows.get(j)
+        pen = lq.price - low
+        if low < lq.price and pen >= minPen * atr
+            reclaimed = not useBody or close > lq.price
+            if reclaimed
+                f_marker(lq.price, false, "⚡ " + str.tostring(pen / atr, "0.0") + " ATR", colStrong, false)
+                pens.push(pen / atr)
+                huntSell.push(bar_index)
+                bullHunt := true
+            else
+                f_marker(lq.price, false, "✕", color.new(color.gray, 0), false)
+            lows.remove(j)
+        j -= 1
+
+// limita muestras de penetracion
+while pens.size() > 200
+    pens.shift()
+
+// -----------------------------------------------------------------------------
+//  RECUENTO PARA EL PANEL
+// -----------------------------------------------------------------------------
+f_recent(array<int> arr) =>
+    while arr.size() > 0 and (bar_index - arr.first()) > lookback
+        arr.shift()
+    arr.size()
+cntBuy  = f_recent(huntBuy)
+cntSell = f_recent(huntSell)
+
+// -----------------------------------------------------------------------------
+//  DIBUJO (solo en la ultima barra: bandas, proyeccion, etiquetas, leyenda)
+// -----------------------------------------------------------------------------
+f_typicalRatio() => pens.size() >= 8 ? array.median(pens) : typDef
+f_extremeRatio() => pens.size() >= 8 ? array.percentile_nearest_rank(pens, 95) : extDef
+
+f_rankColor(float s, float lo, float hi) =>
+    hi <= lo ? colStrong : color.from_gradient(s, lo, hi, colWeak, colStrong)
+
+f_drawLevel(Liq lq, int x2, float lo, float hi, float tRatio, float eRatio) =>
+    col  = f_rankColor(lq.strength, lo, hi)
+    top  = lq.price + half
+    bot  = lq.price - half
+    // limita el borde izquierdo al buffer historico disponible (evita crash)
+    x1 = math.max(lq.bar, bar_index - 4900)
+    bx = box.new(x1, top, x2, bot, border_color=col, border_width=1, bgcolor=color.new(col, 70))
+    dynBox.push(bx)
+    // etiqueta a la derecha: Buy/Sell stops · precio
+    lbl = label.new(x2, lq.price, (lq.isHigh ? "Buy stops · " : "Sell stops · ") + str.tostring(lq.price, format.mintick), style=label.style_label_left, color=color.new(col, 0), textcolor=color.white, size=size.small)
+    dynLbl.push(lbl)
+    // proyeccion del barrido
+    if showProj
+        tP = lq.isHigh ? lq.price + tRatio * atr : lq.price - tRatio * atr
+        eP = lq.isHigh ? lq.price + eRatio * atr : lq.price - eRatio * atr
+        lt = line.new(x1, tP, x2, tP, color=color.new(col, 45), style=line.style_dotted, width=1)
+        le = line.new(x1, eP, x2, eP, color=color.new(col, 70), style=line.style_dotted, width=1)
+        dynLine.push(lt)
+        dynLine.push(le)
+        dynLbl.push(label.new(x2, tP, "typical sweep · " + str.tostring(tP, format.mintick), style=label.style_none, textcolor=color.new(col, 20), size=size.tiny))
+        dynLbl.push(label.new(x2, eP, "1-in-20 sweep · " + str.tostring(eP, format.mintick), style=label.style_none, textcolor=color.new(col, 45), size=size.tiny))
+    // rotura confirmandose (⏳) si la barra viva toca el nivel
+    if barstate.isrealtime and low <= lq.price and high >= lq.price
+        dynLbl.push(label.new(bar_index, lq.price, "⏳ breaking?", style=label.style_label_left, color=color.new(color.orange, 20), textcolor=color.white, size=size.small))
+
+if barstate.islast
+    // limpia dibujos dinamicos previos
+    for b in dynBox
+        b.delete()
+    for l in dynLine
+        l.delete()
+    for t in dynLbl
+        t.delete()
+    dynBox.clear()
+    dynLine.clear()
+    dynLbl.clear()
+
+    x2 = bar_index + rightPad
+    tRatio = f_typicalRatio()
+    eRatio = f_extremeRatio()
+
+    // rango de fuerza entre TODOS los focos activos (color por rango global)
+    float lo = na
+    float hi = na
+    for lq in highs
+        lo := na(lo) ? lq.strength : math.min(lo, lq.strength)
+        hi := na(hi) ? lq.strength : math.max(hi, lq.strength)
+    for lq in lows
+        lo := na(lo) ? lq.strength : math.min(lo, lq.strength)
+        hi := na(hi) ? lq.strength : math.max(hi, lq.strength)
+    lo := na(lo) ? 0.0 : lo
+    hi := na(hi) ? 1.0 : hi
+
+    for lq in highs
+        f_drawLevel(lq, x2, lo, hi, tRatio, eRatio)
+    for lq in lows
+        f_drawLevel(lq, x2, lo, hi, tRatio, eRatio)
+
+    // ---------------- Leyenda ----------------
+    if showLegend
+        lg = table.new(position.bottom_right, 1, 5, bgcolor=color.new(color.black, 15), frame_color=color.new(color.gray, 50), frame_width=1)
+        lg.cell(0, 0, "⚡ barrido y recuperado", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+        lg.cell(0, 1, "✕ roto",                 text_color=color.white, text_size=size.small, text_halign=text.align_left)
+        lg.cell(0, 2, "⏳ rotura confirmandose", text_color=color.white, text_size=size.small, text_halign=text.align_left)
+        lg.cell(0, 3, "color = rango",          text_color=color.white, text_size=size.small, text_halign=text.align_left)
+        lg.cell(0, 4, "rosa = mas fuerte",      text_color=colStrong,   text_size=size.small, text_halign=text.align_left)
+
+    // ---------------- Panel de recuento ----------------
+    if showPanel
+        total = cntBuy + cntSell
+        bias  = total > 0 ? (cntSell - cntBuy) / total : 0.0
+        bTxt  = total == 0 ? "—" : bias > 0.25 ? "Alcista" : bias < -0.25 ? "Bajista" : "Neutro"
+        bCol  = bias > 0.25 ? colWeak : bias < -0.25 ? colStrong : color.gray
+        pn = table.new(position.top_right, 2, 5, border_width=1, frame_color=color.new(color.gray, 50), frame_width=1)
+        pn.cell(0, 0, "HEATMAP STOPHUNTER", text_color=color.white, bgcolor=color.new(color.gray, 10), text_size=size.small)
+        pn.cell(1, 0, "últ. " + str.tostring(lookback), text_color=color.white, bgcolor=color.new(color.gray, 10), text_size=size.small)
+        pn.cell(0, 1, "Cazas ▼ (barren máx)", text_color=color.white, bgcolor=color.new(color.black, 40), text_size=size.small)
+        pn.cell(1, 1, str.tostring(cntBuy),  text_color=colStrong, bgcolor=color.new(color.black, 60), text_size=size.small)
+        pn.cell(0, 2, "Cazas ▲ (barren mín)", text_color=color.white, bgcolor=color.new(color.black, 40), text_size=size.small)
+        pn.cell(1, 2, str.tostring(cntSell), text_color=colWeak,   bgcolor=color.new(color.black, 60), text_size=size.small)
+        pn.cell(0, 3, "Focos activos", text_color=color.white, bgcolor=color.new(color.black, 40), text_size=size.small)
+        pn.cell(1, 3, str.tostring(highs.size()) + " / " + str.tostring(lows.size()), text_color=color.white, bgcolor=color.new(color.black, 60), text_size=size.small)
+        pn.cell(0, 4, "Sesgo de presión", text_color=color.white, bgcolor=color.new(color.black, 40), text_size=size.small)
+        pn.cell(1, 4, bTxt, text_color=bCol, bgcolor=color.new(color.black, 60), text_size=size.small)
+
+// -----------------------------------------------------------------------------
+//  ALERTAS
+// -----------------------------------------------------------------------------
+alertcondition(bearHunt, "Caza de stops bajista", "Barrido de maximos (buy-side): posible trampa alcista / reversion a la baja")
+alertcondition(bullHunt, "Caza de stops alcista", "Barrido de minimos (sell-side): posible trampa bajista / reversion al alza")

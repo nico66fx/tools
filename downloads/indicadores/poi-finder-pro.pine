@@ -1,0 +1,738 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+//  POI FINDER PRO  ·  v1.0
+//  Smart Money Concepts / ICT — Detección y puntuación automática de POIs
+// ───────────────────────────────────────────────────────────────────────────────
+//  FILOSOFÍA
+//  Este indicador NO pinta cientos de zonas. Detecta todas las estructuras SMC
+//  (Order Blocks, Breakers, Mitigation Blocks, FVG, iFVG, Liquidity Sweeps,
+//  BOS, CHoCH, Premium/Discount, volumen) y sólo dibuja una zona cuando VARIAS
+//  de ellas confluyen y superan un umbral de puntuación configurable.
+//
+//  NO REPINTA
+//  · Toda mutación de estado ocurre dentro de `if barstate.isconfirmed`, es decir
+//    únicamente con la vela CERRADA. En histórico esa condición siempre es true,
+//    por lo que el comportamiento en tiempo real y en histórico es idéntico.
+//  · Los pivotes usan ta.pivothigh/ta.pivotlow, que se confirman `pivLen` velas
+//    después y nunca se recalculan hacia atrás.
+//  · No se usa request.security() con lookahead, ni funciones experimentales.
+//
+//  RENDIMIENTO
+//  · Los bucles recorren arrays acotados (máx. ~20 FVG y ~10 POIs activos).
+//  · Las cajas se extienden con extend.right (coste cero) en lugar de
+//    reposicionarse vela a vela.
+//  · El texto de las etiquetas sólo se recalcula en la última vela del gráfico,
+//    que es la única que el usuario ve. Esto elimina miles de operaciones de
+//    string en histórico largo.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+indicator("POI Finder PRO", "POI PRO", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500, max_bars_back = 500)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  0 · PALETA  (modo oscuro, sin exceso de color: verde / rojo / azul / gris)
+// ═══════════════════════════════════════════════════════════════════════════════
+C_BULL  = #00C853   // Verde  — sesgo alcista / BUY POI
+C_BEAR  = #FF5252   // Rojo   — sesgo bajista / SELL POI
+C_INFO  = #2979FF   // Azul   — estructura, información neutra
+C_PANEL = #131722   // Gris muy oscuro — fondo del panel y de las etiquetas
+C_TXT   = #D6DAE3   // Gris claro — texto principal
+C_MUTE  = #6E7787   // Gris medio — texto secundario / zonas desactivadas
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  1 · INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════
+gPerfil = "⚙️  PERFIL"
+gScore  = "🎯  PUNTUACIÓN"
+gDetect = "🔬  DETECCIÓN"
+gZona   = "🧱  GESTIÓN DE ZONAS"
+gVisual = "🎨  VISUAL"
+
+// ── 1.1 Perfil de filtrado y estilo de trading ────────────────────────────────
+modeIn = input.string("Balanceado", "Filtro de calidad", options = ["Agresivo", "Balanceado", "Conservador"], group = gPerfil,
+     tooltip = "Agresivo    → umbral 5/10, hasta 10 POIs. Más señales, más ruido.\n" +
+               "Balanceado  → umbral 7/10, hasta 6 POIs. Exige alineación Premium/Discount.\n" +
+               "Conservador → umbral 8/10, hasta 3 POIs. Exige Order Block + Premium/Discount + (Sweep o CHoCH).")
+
+styleIn = input.string("Automático", "Estilo / temporalidad", options = ["Automático", "Scalping", "Intradía", "Swing"], group = gPerfil,
+     tooltip = "Adapta longitud de pivote, tamaño mínimo de FVG, ventana de barrida y caducidad.\n" +
+               "Automático: ≤15m → Scalping · ≤4H → Intradía · >4H → Swing.")
+
+// ── 1.2 Pesos del sistema de puntuación ───────────────────────────────────────
+wOb    = input.int(2, "Order Block / zona de origen", minval = 0, maxval = 4, group = gScore)
+wFvg   = input.int(2, "FVG sin mitigar en confluencia", minval = 0, maxval = 4, group = gScore)
+wBos   = input.int(2, "Ruptura de estructura (BOS)",  minval = 0, maxval = 4, group = gScore)
+wSweep = input.int(1, "Liquidity Sweep (EQH / EQL)",  minval = 0, maxval = 4, group = gScore)
+wPd    = input.int(1, "Premium / Discount alineado",  minval = 0, maxval = 4, group = gScore)
+wChoch = input.int(1, "Change of Character (CHoCH)",  minval = 0, maxval = 4, group = gScore)
+wVol   = input.int(1, "Volumen de rechazo elevado",   minval = 0, maxval = 4, group = gScore)
+wExt   = input.int(1, "Breaker / desplazamiento S&D", minval = 0, maxval = 4, group = gScore)
+
+useManualThr = input.bool(false, "Umbral manual (ignora el perfil)", group = gScore)
+manualThr    = input.int(7, "Umbral mínimo  (x/10)", minval = 1, maxval = 10, group = gScore,
+     tooltip = "La puntuación bruta se normaliza a una escala 0-10 según los pesos activos.")
+
+// ── 1.3 Parámetros de detección ───────────────────────────────────────────────
+useManualDet = input.bool(false, "Parámetros manuales (ignora el estilo)", group = gDetect)
+pivManual    = input.int(8,    "Longitud de pivote",            minval = 2,   maxval = 50,  group = gDetect)
+fvgManual    = input.float(0.22, "Tamaño mínimo FVG (× ATR)",   minval = 0.0, maxval = 3.0, step = 0.01, group = gDetect)
+obManual     = input.int(18,   "Lookback Order Block (velas)",  minval = 3,   maxval = 60,  group = gDetect)
+ageManual    = input.int(350,  "Caducidad del POI (velas)",     minval = 20,  maxval = 3000, group = gDetect)
+swManual     = input.int(20,   "Ventana de barrida (velas)",    minval = 2,   maxval = 100, group = gDetect)
+
+eqTol    = input.float(0.10, "Tolerancia máximos/mínimos iguales (× ATR)", minval = 0.01, maxval = 1.0, step = 0.01, group = gDetect,
+     tooltip = "Dos swings se consideran 'iguales' (EQH/EQL) si difieren menos de este múltiplo del ATR.")
+volThr   = input.float(1.6,  "Volumen alto (× media 20)", minval = 1.0, maxval = 5.0, step = 0.1, group = gDetect)
+dispMult = input.float(1.2,  "Desplazamiento mínimo (× ATR)", minval = 0.2, maxval = 5.0, step = 0.1, group = gDetect,
+     tooltip = "Recorrido del impulso desde la zona de origen para considerarlo Supply/Demand válido.")
+zoneMode = input.string("Mecha (High/Low)", "Construcción de la zona", options = ["Mecha (High/Low)", "Cuerpo (Open/Close)"], group = gDetect)
+
+// ── 1.4 Gestión y ciclo de vida de las zonas ──────────────────────────────────
+mitPct     = input.float(50, "Mitigación al alcanzar el (%) de la zona", minval = 1, maxval = 100, step = 5, group = gZona,
+     tooltip = "0 % = borde de entrada · 50 % = punto medio (equilibrium) · 100 % = borde extremo.")
+delInvalid = input.bool(true,  "Borrar POIs invalidados",  group = gZona)
+delMit     = input.bool(true,  "Borrar POIs mitigados",    group = gZona)
+keepBars   = input.int(15, "Velas que se conserva un POI mitigado", minval = 0, maxval = 200, group = gZona)
+coolDown   = input.int(10, "Separación mínima entre POIs del mismo lado (velas)", minval = 0, maxval = 200, group = gZona)
+
+// ── 1.5 Visual ────────────────────────────────────────────────────────────────
+compactLab = input.bool(false, "Etiquetas compactas (sólo título)", group = gVisual)
+labOffset  = input.int(2, "Separación de la etiqueta (velas)", minval = 0, maxval = 30, group = gVisual)
+zoneTrans  = input.int(88, "Transparencia del relleno", minval = 60, maxval = 98, group = gVisual)
+showBOS    = input.bool(true,  "Mostrar BOS / CHoCH",              group = gVisual)
+showMS     = input.bool(false, "Mostrar estructura HH · HL · LH · LL", group = gVisual)
+showEQ     = input.bool(true,  "Mostrar EQH / EQL (liquidez)",     group = gVisual)
+showFVG    = input.bool(false, "Mostrar FVG en bruto",             group = gVisual,
+     tooltip = "Desactivado por defecto: los FVG ya se puntúan dentro del POI. Actívalo sólo para auditar la detección.")
+showPD     = input.bool(false, "Mostrar rango Premium / Discount", group = gVisual)
+showDash   = input.bool(true,  "Mostrar panel de control",         group = gVisual)
+dashPos    = input.string("Superior derecha", "Posición del panel", options = ["Superior derecha", "Superior izquierda", "Inferior derecha", "Inferior izquierda"], group = gVisual)
+
+colBull = input.color(C_BULL, "Alcista", inline = "col", group = gVisual)
+colBear = input.color(C_BEAR, "Bajista", inline = "col", group = gVisual)
+colInfo = input.color(C_INFO, "Neutro",  inline = "col", group = gVisual)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  2 · PRESETS DERIVADOS DEL PERFIL Y DEL ESTILO
+//  Todos los valores son `simple` (constantes durante la ejecución), requisito
+//  de ta.pivothigh/ta.pivotlow y de los límites de bucle.
+// ═══════════════════════════════════════════════════════════════════════════════
+tfSec     = timeframe.in_seconds(timeframe.period)
+autoStyle = tfSec <= 900 ? "Scalping" : tfSec <= 14400 ? "Intradía" : "Swing"
+styleSel  = styleIn == "Automático" ? autoStyle : styleIn
+
+// Parámetros de detección según el estilo (o manuales si el usuario lo fuerza)
+pivLen   = useManualDet ? pivManual : styleSel == "Scalping" ? 5    : styleSel == "Intradía" ? 8    : 14
+fvgMinF  = useManualDet ? fvgManual : styleSel == "Scalping" ? 0.12 : styleSel == "Intradía" ? 0.22 : 0.35
+obLook   = useManualDet ? obManual  : styleSel == "Scalping" ? 12   : styleSel == "Intradía" ? 18   : 25
+maxAge   = useManualDet ? ageManual : styleSel == "Scalping" ? 200  : styleSel == "Intradía" ? 350  : 600
+sweepWin = useManualDet ? swManual  : styleSel == "Scalping" ? 12   : styleSel == "Intradía" ? 20   : 30
+
+// Umbral y cupo de POIs según el perfil de calidad
+thrPreset = modeIn == "Agresivo" ? 5 : modeIn == "Balanceado" ? 7 : 8
+scoreThr  = useManualThr ? manualThr : thrPreset
+maxPoi    = modeIn == "Agresivo" ? 10 : modeIn == "Balanceado" ? 6 : 3
+
+useWicks = zoneMode == "Mecha (High/Low)"
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  3 · CÁLCULOS BASE  (ATR y volumen relativo)
+//  Se calculan SIEMPRE en el ámbito global: las funciones ta.* necesitan
+//  ejecutarse en cada vela para mantener su estado interno correcto.
+// ═══════════════════════════════════════════════════════════════════════════════
+atrV   = ta.atr(14)
+volAvg = ta.sma(volume, 20)
+hasVolData = not na(volume) and not na(volAvg) and volAvg > 0
+relVol = hasVolData ? volume / volAvg : 1.0
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  4 · TIPO POI  y  ESTADO GLOBAL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Un POI es una zona puntuada con su caja, su etiqueta y su ciclo de vida.
+type POI
+    box    bx            // caja dibujada
+    label  lb            // etiqueta informativa
+    bool   isBull        // true = BUY POI (demanda) · false = SELL POI (oferta)
+    float  top           // borde superior de la zona
+    float  bot           // borde inferior de la zona
+    float  mid           // nivel de mitigación (según mitPct)
+    int    startBar      // bar_index de creación
+    int    endBar        // bar_index en que dejó de estar activa
+    int    score         // puntuación normalizada 0-10
+    string tags          // confluencias en texto
+    bool   entered       // el precio ha tocado la zona
+    bool   mitigated     // el precio ha alcanzado el nivel de mitigación
+    bool   invalidated   // el precio ha cerrado al otro lado de la zona
+
+// ── 4.1 Lista de POIs activos ─────────────────────────────────────────────────
+var poiList = array.new<POI>()
+
+// ── 4.2 Inventario de Fair Value Gaps ─────────────────────────────────────────
+// Convención unificada: `top` siempre es el borde superior y `bot` el inferior.
+//   dir =  1 → gap alcista (soporte, el precio está por encima)
+//   dir = -1 → gap bajista (resistencia, el precio está por debajo)
+// Un FVG totalmente atravesado invierte su `dir` y pasa a ser un Inverse FVG.
+var fvgTop = array.new<float>()
+var fvgBot = array.new<float>()
+var fvgBar = array.new<int>()
+var fvgDir = array.new<int>()
+var fvgMit = array.new<bool>()
+var fvgInv = array.new<bool>()
+FVG_MAX = 20   // tope duro del inventario: acota el coste de los bucles
+
+// ── 4.3 Estructura de mercado ─────────────────────────────────────────────────
+var float swHigh     = na   // último swing high confirmado
+var int   swHighBar  = na
+var float swLow      = na   // último swing low confirmado
+var int   swLowBar   = na
+var float prevSwHigh = na   // swing high anterior (para HH / LH y EQH)
+var float prevSwLow  = na   // swing low anterior  (para HL / LL y EQL)
+
+var float bosHighRef    = na   // nivel de estructura pendiente de romper al alza
+var int   bosHighRefBar = na
+var float bosLowRef     = na   // nivel de estructura pendiente de romper a la baja
+var int   bosLowRefBar  = na
+var int   trend         = 0    // 1 alcista · -1 bajista · 0 sin definir
+
+// ── 4.4 Liquidez ──────────────────────────────────────────────────────────────
+var bool  swHighTaken   = false  // el último swing high ya fue barrido
+var bool  swLowTaken    = false
+var int   sweepHighBar  = na     // última barrida de máximos (sesgo bajista)
+var int   sweepLowBar   = na     // última barrida de mínimos (sesgo alcista)
+var bool  sweepHighEq   = false  // la barrida se produjo sobre un EQH
+var bool  sweepLowEq    = false
+var bool  eqhActive     = false  // hay máximos iguales pendientes
+var bool  eqlActive     = false
+
+// ── 4.5 Memoria de zonas rotas (para clasificar Breaker Blocks) ───────────────
+var float brokenBullTop = na
+var float brokenBullBot = na
+var float brokenBearTop = na
+var float brokenBearBot = na
+
+// ── 4.6 Anti-saturación ───────────────────────────────────────────────────────
+var int lastBullPoiBar = na
+var int lastBearPoiBar = na
+
+// ── 4.7 Flags de evento del bar actual (alimentan alertcondition) ─────────────
+bool evNewBuy  = false
+bool evNewSell = false
+bool evMit     = false
+bool evInv     = false
+bool evEnter   = false
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  5 · FUNCIONES AUXILIARES
+//  Declaradas antes de la lógica principal (Pine resuelve por orden de aparición).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 5.1 · Estrellas de fuerza a partir de la puntuación normalizada.
+starsOf(int s) =>
+    s >= 9 ? "★★★★★" : s >= 8 ? "★★★★" : s >= 7 ? "★★★" : "★★"
+
+// 5.2 · Localiza la última vela contraria antes del impulso: el Order Block.
+//       Devuelve [borde superior, borde inferior, offset en velas].
+//       `lookback` es simple int, por lo que el bucle tiene límite conocido.
+findOB(bool bull, simple int lookback) =>
+    float t  = na
+    float b  = na
+    int   ix = na
+    for i = 1 to lookback
+        bool opposite = bull ? close[i] < open[i] : close[i] > open[i]
+        if opposite
+            ix := i
+            t  := useWicks ? high[i] : math.max(open[i], close[i])
+            b  := useWicks ? low[i]  : math.min(open[i], close[i])
+            break
+    [t, b, ix]
+
+// 5.3 · ¿Existe un FVG sin mitigar que solape la zona candidata?
+//       Devuelve [encontrado, era_inverse].
+fvgConfluence(float zTop, float zBot, int wantDir, float tol) =>
+    bool found = false
+    bool isInv = false
+    if fvgTop.size() > 0
+        for i = fvgTop.size() - 1 to 0
+            if fvgDir.get(i) == wantDir and not fvgMit.get(i)
+                float ft = fvgTop.get(i)
+                float fb = fvgBot.get(i)
+                // Solape con margen de tolerancia por ambos lados
+                if ft >= zBot - tol and fb <= zTop + tol
+                    found := true
+                    isInv := fvgInv.get(i)
+                    break
+    [found, isInv]
+
+// 5.4 · ¿La zona candidata solapa un POI activo del mismo sesgo?
+//       Evita apilar cajas redundantes en el mismo nivel.
+overlapsActive(float zTop, float zBot, bool bull) =>
+    bool ov = false
+    if poiList.size() > 0
+        for i = 0 to poiList.size() - 1
+            POI p = poiList.get(i)
+            if p.isBull == bull and not p.invalidated and zTop >= p.bot and zBot <= p.top
+                ov := true
+                break
+    ov
+
+// 5.5 · Texto de la etiqueta de un POI. Sólo se invoca en creación y en la
+//       última vela del gráfico: nunca en bucle histórico.
+poiText(POI p) =>
+    string head = (p.isBull ? "▲ BUY POI" : "▼ SELL POI") + "   " + starsOf(p.score)
+    string res  = head
+    if not compactLab
+        int    age = (p.mitigated or p.invalidated ? p.endBar : bar_index) - p.startBar
+        string st  = p.invalidated ? "INVALIDADA" : p.mitigated ? "MITIGADA" : p.entered ? "EN ZONA" : "ACTIVA"
+        res := head + "\n" + str.tostring(p.score) + "/10   ·   " + p.tags + "\n" + str.tostring(age) + " velas   ·   " + st
+    res
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  6 · PIVOTES  (base de toda la estructura de mercado)
+//  ta.pivothigh se confirma `pivLen` velas después del pivote → no repinta.
+// ═══════════════════════════════════════════════════════════════════════════════
+phVal = ta.pivothigh(high, pivLen, pivLen)
+plVal = ta.pivotlow(low,  pivLen, pivLen)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  7 · BLOQUE PRINCIPAL — SÓLO CON LA VELA CERRADA
+//  Toda la mutación de estado vive aquí dentro. Esto es lo que garantiza que el
+//  indicador no repinte: en tiempo real nada cambia hasta el cierre de la vela.
+// ═══════════════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.1 · ACTUALIZACIÓN DE LA ESTRUCTURA DE MERCADO
+    // ───────────────────────────────────────────────────────────────────────────
+    if not na(phVal)
+        prevSwHigh := swHigh
+        swHigh     := phVal
+        swHighBar  := bar_index - pivLen
+        swHighTaken := false
+        // Nivel pendiente de romper al alza
+        bosHighRef    := phVal
+        bosHighRefBar := bar_index - pivLen
+        // Máximos iguales = bolsa de liquidez de compra
+        eqhActive := not na(prevSwHigh) and math.abs(phVal - prevSwHigh) <= eqTol * atrV
+        if showEQ and eqhActive
+            line.new(bar_index - pivLen * 2, math.max(phVal, prevSwHigh), bar_index - pivLen, math.max(phVal, prevSwHigh), color = color.new(colInfo, 30), style = line.style_dotted, width = 1)
+            label.new(bar_index - pivLen, math.max(phVal, prevSwHigh), "EQH", style = label.style_label_left, color = color.new(C_PANEL, 100), textcolor = color.new(colInfo, 20), size = size.tiny)
+        if showMS
+            string tagHigh = na(prevSwHigh) ? "H" : phVal > prevSwHigh ? "HH" : "LH"
+            label.new(bar_index - pivLen, phVal, tagHigh, style = label.style_label_down, color = color.new(C_PANEL, 100), textcolor = color.new(C_MUTE, 15), size = size.tiny)
+
+    if not na(plVal)
+        prevSwLow := swLow
+        swLow     := plVal
+        swLowBar  := bar_index - pivLen
+        swLowTaken := false
+        bosLowRef    := plVal
+        bosLowRefBar := bar_index - pivLen
+        eqlActive := not na(prevSwLow) and math.abs(plVal - prevSwLow) <= eqTol * atrV
+        if showEQ and eqlActive
+            line.new(bar_index - pivLen * 2, math.min(plVal, prevSwLow), bar_index - pivLen, math.min(plVal, prevSwLow), color = color.new(colInfo, 30), style = line.style_dotted, width = 1)
+            label.new(bar_index - pivLen, math.min(plVal, prevSwLow), "EQL", style = label.style_label_left, color = color.new(C_PANEL, 100), textcolor = color.new(colInfo, 20), size = size.tiny)
+        if showMS
+            string tagLow = na(prevSwLow) ? "L" : plVal < prevSwLow ? "LL" : "HL"
+            label.new(bar_index - pivLen, plVal, tagLow, style = label.style_label_up, color = color.new(C_PANEL, 100), textcolor = color.new(C_MUTE, 15), size = size.tiny)
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.2 · LIQUIDITY SWEEPS
+    //  Barrida = la mecha perfora el swing pero el cuerpo cierra de vuelta.
+    //  Es el patrón de "stop hunt" que precede a los mejores POIs.
+    // ───────────────────────────────────────────────────────────────────────────
+    if not na(swHigh) and not swHighTaken and high > swHigh and close < swHigh
+        swHighTaken  := true
+        sweepHighBar := bar_index
+        sweepHighEq  := eqhActive
+        eqhActive    := false
+
+    if not na(swLow) and not swLowTaken and low < swLow and close > swLow
+        swLowTaken  := true
+        sweepLowBar := bar_index
+        sweepLowEq  := eqlActive
+        eqlActive   := false
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.3 · FAIR VALUE GAPS  ·  detección
+    //  Patrón de 3 velas: hueco entre la mecha de la vela [2] y la de la vela [0].
+    //  Se exige tamaño mínimo en múltiplos de ATR para descartar micro-huecos.
+    // ───────────────────────────────────────────────────────────────────────────
+    bool bullFvgRaw = low > high[2] and close[1] > open[1] and (low - high[2]) >= fvgMinF * atrV
+    bool bearFvgRaw = high < low[2] and close[1] < open[1] and (low[2] - high) >= fvgMinF * atrV
+
+    if bullFvgRaw or bearFvgRaw
+        fvgTop.push(bullFvgRaw ? low : low[2])
+        fvgBot.push(bullFvgRaw ? high[2] : high)
+        fvgBar.push(bar_index)
+        fvgDir.push(bullFvgRaw ? 1 : -1)
+        fvgMit.push(false)
+        fvgInv.push(false)
+        if showFVG
+            box.new(bar_index - 2, bullFvgRaw ? low : low[2], bar_index, bullFvgRaw ? high[2] : high, border_color = color.new(bullFvgRaw ? colBull : colBear, 70), border_width = 1, bgcolor = color.new(bullFvgRaw ? colBull : colBear, 92), extend = extend.right)
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.4 · FAIR VALUE GAPS  ·  mitigación, inversión y poda
+    //  Un gap alcista totalmente perforado (cierre por debajo) se convierte en
+    //  Inverse FVG bajista: cambia de signo y vuelve a contar como resistencia.
+    // ───────────────────────────────────────────────────────────────────────────
+    if fvgTop.size() > 0
+        for i = fvgTop.size() - 1 to 0
+            int   d = fvgDir.get(i)
+            float t = fvgTop.get(i)
+            float b = fvgBot.get(i)
+            if d == 1
+                if close < b
+                    // Perforado por completo → se invierte a resistencia
+                    fvgDir.set(i, -1)
+                    fvgInv.set(i, true)
+                    fvgMit.set(i, false)
+                else if low <= t
+                    fvgMit.set(i, true)
+            else
+                if close > t
+                    fvgDir.set(i, 1)
+                    fvgInv.set(i, true)
+                    fvgMit.set(i, false)
+                else if high >= b
+                    fvgMit.set(i, true)
+            // Poda: mitigado y antiguo, o simplemente demasiado antiguo
+            if (fvgMit.get(i) and bar_index - fvgBar.get(i) > 30) or bar_index - fvgBar.get(i) > maxAge
+                fvgTop.remove(i)
+                fvgBot.remove(i)
+                fvgBar.remove(i)
+                fvgDir.remove(i)
+                fvgMit.remove(i)
+                fvgInv.remove(i)
+
+    // Tope duro del inventario: descarta siempre el más antiguo
+    while fvgTop.size() > FVG_MAX
+        fvgTop.shift()
+        fvgBot.shift()
+        fvgBar.shift()
+        fvgDir.shift()
+        fvgMit.shift()
+        fvgInv.shift()
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.5 · BOS  y  CHoCH
+    //  Se exige CIERRE más allá del nivel (no basta con la mecha): esto elimina
+    //  la mayoría de rupturas falsas y hace la señal definitiva al cierre.
+    //  · BOS   → ruptura a favor de la tendencia vigente (continuación).
+    //  · CHoCH → primera ruptura en contra (cambio de carácter).
+    // ───────────────────────────────────────────────────────────────────────────
+    bool brokeUp = not na(bosHighRef) and close > bosHighRef
+    bool brokeDn = not na(bosLowRef)  and close < bosLowRef
+
+    // Vela de expansión que rompe los dos extremos: estructuralmente ambigua.
+    // Se actualiza la tendencia pero NO se genera POI (evita zonas de baja calidad).
+    bool bothBroke = brokeUp and brokeDn
+
+    bool bullChoch = brokeUp and trend <= 0
+    bool bearChoch = brokeDn and trend >= 0
+
+    if showBOS and brokeUp
+        line.new(bosHighRefBar, bosHighRef, bar_index, bosHighRef, color = color.new(colBull, 40), style = line.style_dashed, width = 1)
+        label.new(bar_index, bosHighRef, bullChoch ? "CHoCH" : "BOS", style = label.style_label_left, color = color.new(C_PANEL, 100), textcolor = color.new(colBull, 10), size = size.tiny)
+    if showBOS and brokeDn
+        line.new(bosLowRefBar, bosLowRef, bar_index, bosLowRef, color = color.new(colBear, 40), style = line.style_dashed, width = 1)
+        label.new(bar_index, bosLowRef, bearChoch ? "CHoCH" : "BOS", style = label.style_label_left, color = color.new(C_PANEL, 100), textcolor = color.new(colBear, 10), size = size.tiny)
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.6 · CONSTRUCCIÓN Y PUNTUACIÓN DEL POI
+    //  Sólo se evalúa en la vela en la que se rompe estructura: es el único
+    //  momento en que un origen institucional queda validado por el mercado.
+    // ───────────────────────────────────────────────────────────────────────────
+    if (brokeUp or brokeDn) and not bothBroke
+        bool isBull = brokeUp
+        bool isChoch = isBull ? bullChoch : bearChoch
+
+        // ─ Zona de origen: último candle contrario antes del impulso ─
+        [obT, obB, obIx] = findOB(isBull, obLook)
+
+        // `bar_index - obIx >= 0` protege el arranque del gráfico: sin él, una
+        // ruptura en las primeras velas podría intentar dibujar en un índice negativo.
+        if not na(obIx) and not na(obT) and obT > obB and bar_index - obIx >= 0
+            int   obBar   = bar_index - obIx
+            float zTop    = obT
+            float zBot    = obB
+            float zMid    = zBot + (zTop - zBot) * (isBull ? (1.0 - mitPct / 100.0) : (mitPct / 100.0))
+            float zCenter = (zTop + zBot) / 2.0
+
+            // ── Confluencia 1 · el propio Order Block ──
+            bool hasOB = true
+
+            // ── Confluencia 2 · FVG / iFVG sin mitigar solapando la zona ──
+            [fFound, fInv] = fvgConfluence(zTop, zBot, isBull ? 1 : -1, atrV * 0.5)
+            bool hasFVG = fFound
+
+            // ── Confluencia 3 · ruptura de estructura (siempre presente aquí) ──
+            bool hasBOS = true
+
+            // ── Confluencia 4 · barrida de liquidez reciente en el mismo sentido ──
+            int  swBar    = isBull ? sweepLowBar : sweepHighBar
+            bool sweepEq  = isBull ? sweepLowEq  : sweepHighEq
+            bool hasSweep = not na(swBar) and (bar_index - swBar) <= sweepWin
+
+            // ── Confluencia 5 · Premium / Discount sobre el rango operativo ──
+            bool rangeOk = not na(swHigh) and not na(swLow) and swHigh > swLow
+            float eqLvl  = rangeOk ? (swHigh + swLow) / 2.0 : na
+            bool hasPD   = rangeOk and (isBull ? zCenter <= eqLvl : zCenter >= eqLvl)
+
+            // ── Confluencia 6 · Change of Character ──
+            bool hasCHOCH = isChoch
+
+            // ── Confluencia 7 · rechazo con volumen elevado en la vela de origen ──
+            bool hasVol = hasVolData and relVol[obIx] >= volThr
+
+            // ── Confluencia 8 · Breaker o desplazamiento tipo Supply/Demand ──
+            //   Breaker: la zona reutiliza el nivel de un POI contrario invalidado.
+            bool isBreaker = isBull ? (not na(brokenBearTop) and zTop >= brokenBearBot and zBot <= brokenBearTop) : (not na(brokenBullTop) and zTop >= brokenBullBot and zBot <= brokenBullTop)
+            float legRange = isBull ? (close - low[obIx]) : (high[obIx] - close)
+            bool hasDisp   = legRange >= dispMult * atrV
+            bool hasExt    = isBreaker or hasDisp
+
+            // ── Puntuación bruta y normalización a escala 0-10 ──
+            int rawScore = (hasOB ? wOb : 0) + (hasFVG ? wFvg : 0) + (hasBOS ? wBos : 0) + (hasSweep ? wSweep : 0) + (hasPD ? wPd : 0) + (hasCHOCH ? wChoch : 0) + (hasVol ? wVol : 0) + (hasExt ? wExt : 0)
+            int maxRaw   = wOb + wFvg + wBos + wSweep + wPd + wChoch + wVol + wExt
+            int score10  = maxRaw > 0 ? int(math.round(10.0 * rawScore / maxRaw)) : 0
+
+            // ── Filtros del perfil de calidad ──
+            bool gateAgg  = true
+            bool gateBal  = hasPD
+            bool gateCon  = hasOB and hasPD and (hasSweep or hasCHOCH)
+            bool modeGate = modeIn == "Agresivo" ? gateAgg : modeIn == "Balanceado" ? gateBal : gateCon
+
+            // ── Filtros estructurales de sanidad ──
+            //   El precio debe estar FUERA de la zona y en el lado correcto,
+            //   si no la zona ya está consumida y no sirve como POI.
+            bool priceOk = isBull ? close > zTop : close < zBot
+            int  lastBar = isBull ? lastBullPoiBar : lastBearPoiBar
+            bool coolOk  = na(lastBar) or (bar_index - lastBar) >= coolDown
+            bool freeOk  = not overlapsActive(zTop, zBot, isBull)
+
+            if score10 >= scoreThr and modeGate and priceOk and coolOk and freeOk
+
+                // ── Cadena de confluencias para la etiqueta ──
+                //   Clasificación del tipo de zona según doctrina ICT:
+                //   · OB → hubo barrida de liquidez previa (mayor calidad)
+                //   · BB → Breaker Block: nivel de una zona contraria rota
+                //   · MB → Mitigation Block: origen sin barrida previa
+                string zType = isBreaker ? "BB" : hasSweep ? "OB" : "MB"
+                string tg    = zType
+                tg := tg + (hasFVG   ? (fInv ? " ·iFVG" : " ·FVG") : "")
+                tg := tg + (hasCHOCH ? " ·CHoCH" : " ·BOS")
+                tg := tg + (hasSweep ? (sweepEq ? (isBull ? " ·EQL" : " ·EQH") : " ·SWEEP") : "")
+                tg := tg + (hasPD    ? (isBull ? " ·DISC" : " ·PREM") : "")
+                tg := tg + (hasVol   ? " ·VOL" : "")
+                tg := tg + (hasDisp  ? " ·DISP" : "")
+
+                color cMain = isBull ? colBull : colBear
+
+                box nbx = box.new(obBar, zTop, bar_index + 1, zBot, border_color = color.new(cMain, 35), border_width = 1, bgcolor = color.new(cMain, zoneTrans), extend = extend.right)
+
+                label nlb = label.new(bar_index + labOffset, zCenter, "", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(C_PANEL, 12), textcolor = cMain, size = size.small, textalign = text.align_left)
+
+                POI np = POI.new(bx = nbx, lb = nlb, isBull = isBull, top = zTop, bot = zBot, mid = zMid, startBar = bar_index, endBar = na, score = score10, tags = tg, entered = false, mitigated = false, invalidated = false)
+                label.set_text(nlb, poiText(np))
+                poiList.push(np)
+
+                if isBull
+                    lastBullPoiBar := bar_index
+                    evNewBuy := true
+                    alert("🟢 NUEVO BUY POI  " + str.tostring(score10) + "/10  " + starsOf(score10) + "  ·  " + tg + "  ·  " + syminfo.ticker + " " + timeframe.period + "  ·  zona " + str.tostring(math.round_to_mintick(zBot)) + " – " + str.tostring(math.round_to_mintick(zTop)), alert.freq_once_per_bar_close)
+                else
+                    lastBearPoiBar := bar_index
+                    evNewSell := true
+                    alert("🔴 NUEVO SELL POI  " + str.tostring(score10) + "/10  " + starsOf(score10) + "  ·  " + tg + "  ·  " + syminfo.ticker + " " + timeframe.period + "  ·  zona " + str.tostring(math.round_to_mintick(zBot)) + " – " + str.tostring(math.round_to_mintick(zTop)), alert.freq_once_per_bar_close)
+
+                // Cupo máximo: al superarlo se descarta el POI más antiguo
+                while poiList.size() > maxPoi
+                    POI old = poiList.shift()
+                    box.delete(old.bx)
+                    label.delete(old.lb)
+
+    // Consumido el nivel, se anula hasta que se forme un pivote nuevo.
+    // Este bloque vive FUERA del condicional anterior para que la tendencia se
+    // actualice también en las velas de expansión que rompen ambos extremos.
+    if brokeUp
+        bosHighRef := na
+    if brokeDn
+        bosLowRef := na
+    if bothBroke
+        trend := close > open ? 1 : -1
+    else if brokeUp
+        trend := 1
+    else if brokeDn
+        trend := -1
+
+    // ───────────────────────────────────────────────────────────────────────────
+    //  7.7 · CICLO DE VIDA DE LOS POIs
+    //  Recorrido descendente para poder eliminar sin romper los índices.
+    //  El array está acotado por `maxPoi` (≤10), así que el coste es trivial.
+    // ───────────────────────────────────────────────────────────────────────────
+    if poiList.size() > 0
+        for i = poiList.size() - 1 to 0
+            POI p = poiList.get(i)
+
+            // Un POI nunca se evalúa en su propia vela de creación: la zona de
+            // origen queda velas atrás y el impulso ya la ha dejado detrás.
+            bool live = bar_index > p.startBar
+
+            // ── Invalidación: cierre completo al otro lado de la zona ──
+            bool inv = live and not p.invalidated and (p.isBull ? close < p.bot : close > p.top)
+            if inv
+                p.invalidated := true
+                p.endBar := bar_index
+                evInv := true
+                // Se memoriza el nivel: un futuro POI contrario aquí será Breaker
+                if p.isBull
+                    brokenBullTop := p.top
+                    brokenBullBot := p.bot
+                else
+                    brokenBearTop := p.top
+                    brokenBearBot := p.bot
+                box.set_extend(p.bx, extend.none)
+                box.set_right(p.bx, bar_index)
+                box.set_bgcolor(p.bx, color.new(C_MUTE, 94))
+                box.set_border_color(p.bx, color.new(C_MUTE, 60))
+                label.set_textcolor(p.lb, C_MUTE)
+                label.set_x(p.lb, bar_index + labOffset)
+                label.set_text(p.lb, poiText(p))
+                alert("⚫ POI INVALIDADO  " + (p.isBull ? "BUY" : "SELL") + "  " + str.tostring(p.score) + "/10  ·  " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar_close)
+
+            // ── Mitigación: el precio alcanza el nivel configurado (por defecto 50 %) ──
+            if live and not p.invalidated and not p.mitigated and (p.isBull ? low <= p.mid : high >= p.mid)
+                p.mitigated := true
+                p.endBar := bar_index
+                evMit := true
+                box.set_extend(p.bx, extend.none)
+                box.set_right(p.bx, bar_index)
+                box.set_bgcolor(p.bx, color.new(p.isBull ? colBull : colBear, 94))
+                box.set_border_color(p.bx, color.new(C_MUTE, 55))
+                label.set_x(p.lb, bar_index + labOffset)
+                label.set_text(p.lb, poiText(p))
+                alert("🟡 POI MITIGADO  " + (p.isBull ? "BUY" : "SELL") + "  " + str.tostring(p.score) + "/10  ·  " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar_close)
+
+            // ── Primera entrada del precio en la zona ──
+            if live and not p.entered and not p.invalidated and low <= p.top and high >= p.bot
+                p.entered := true
+                evEnter := true
+                box.set_border_width(p.bx, 2)
+                alert("🔵 PRECIO ENTRANDO EN " + (p.isBull ? "BUY" : "SELL") + " POI  " + str.tostring(p.score) + "/10  " + starsOf(p.score) + "  ·  " + p.tags + "  ·  " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar_close)
+
+            // ── Limpieza automática del gráfico ──
+            bool killInv = p.invalidated and delInvalid and (bar_index - p.endBar) >= keepBars
+            bool killMit = p.mitigated and delMit and (bar_index - p.endBar) >= keepBars
+            bool killAge = not p.entered and (bar_index - p.startBar) > maxAge
+            if killInv or killMit or killAge
+                box.delete(p.bx)
+                label.delete(p.lb)
+                poiList.remove(i)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  8 · REFRESCO VISUAL EN LA ÚLTIMA VELA
+//  Las etiquetas siguen al borde derecho y actualizan su contador de velas.
+//  Al ejecutarse sólo en la última vela, el coste en histórico es nulo.
+// ═══════════════════════════════════════════════════════════════════════════════
+if barstate.islast and poiList.size() > 0
+    for i = 0 to poiList.size() - 1
+        POI p = poiList.get(i)
+        if not p.mitigated and not p.invalidated
+            label.set_x(p.lb, bar_index + labOffset)
+            label.set_y(p.lb, (p.top + p.bot) / 2.0)
+            label.set_text(p.lb, poiText(p))
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  9 · RANGO PREMIUM / DISCOUNT  (opcional)
+//  Dibuja el rango operativo vigente y su equilibrio del 50 %.
+// ═══════════════════════════════════════════════════════════════════════════════
+var line lnPrem = na
+var line lnEq   = na
+var line lnDisc = na
+if showPD and barstate.islast and not na(swHigh) and not na(swLow) and swHigh > swLow
+    float eqL = (swHigh + swLow) / 2.0
+    int   x1  = math.min(nz(swHighBar, bar_index), nz(swLowBar, bar_index))
+    line.delete(lnPrem)
+    line.delete(lnEq)
+    line.delete(lnDisc)
+    lnPrem := line.new(x1, swHigh, bar_index, swHigh, color = color.new(colBear, 55), style = line.style_solid, width = 1)
+    lnEq   := line.new(x1, eqL,    bar_index, eqL,    color = color.new(colInfo, 45), style = line.style_dashed, width = 1)
+    lnDisc := line.new(x1, swLow,  bar_index, swLow,  color = color.new(colBull, 55), style = line.style_solid, width = 1)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  10 · PANEL DE CONTROL
+//  Se crea una única vez y sólo se rellena en la última vela.
+// ═══════════════════════════════════════════════════════════════════════════════
+dashPosition = dashPos == "Superior derecha" ? position.top_right : dashPos == "Superior izquierda" ? position.top_left : dashPos == "Inferior derecha" ? position.bottom_right : position.bottom_left
+
+var table dash = table.new(dashPosition, 2, 8, bgcolor = color.new(C_PANEL, 8), border_color = color.new(C_MUTE, 75), border_width = 1, frame_color = color.new(C_MUTE, 60), frame_width = 1)
+
+if showDash and barstate.islast
+    // Métricas agregadas de los POIs vivos
+    int   nAct  = 0
+    int   best  = 0
+    bool  bestB = true
+    if poiList.size() > 0
+        for i = 0 to poiList.size() - 1
+            POI p = poiList.get(i)
+            if not p.invalidated and not p.mitigated
+                nAct += 1
+                if p.score > best
+                    best  := p.score
+                    bestB := p.isBull
+
+    string trTxt = trend == 1 ? "ALCISTA" : trend == -1 ? "BAJISTA" : "SIN DEFINIR"
+    color  trCol = trend == 1 ? colBull : trend == -1 ? colBear : C_MUTE
+
+    bool   rgOk  = not na(swHigh) and not na(swLow) and swHigh > swLow
+    float  eqNow = rgOk ? (swHigh + swLow) / 2.0 : na
+    string pdTxt = not rgOk ? "—" : close > eqNow ? "PREMIUM" : close < eqNow ? "DISCOUNT" : "EQUILIBRIUM"
+    color  pdCol = not rgOk ? C_MUTE : close > eqNow ? colBear : colBull
+
+    table.cell(dash, 0, 0, "POI FINDER PRO", text_color = C_TXT,  text_size = size.small, bgcolor = color.new(colInfo, 80))
+    table.cell(dash, 1, 0, styleSel,          text_color = colInfo, text_size = size.small, bgcolor = color.new(colInfo, 80))
+
+    table.cell(dash, 0, 1, "Perfil",       text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 1, modeIn,         text_color = C_TXT,  text_size = size.tiny, text_halign = text.align_right)
+
+    table.cell(dash, 0, 2, "Umbral",       text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 2, str.tostring(scoreThr) + "/10", text_color = C_TXT, text_size = size.tiny, text_halign = text.align_right)
+
+    table.cell(dash, 0, 3, "Tendencia",    text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 3, trTxt,          text_color = trCol,  text_size = size.tiny, text_halign = text.align_right)
+
+    table.cell(dash, 0, 4, "Rango",        text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 4, pdTxt,          text_color = pdCol,  text_size = size.tiny, text_halign = text.align_right)
+
+    table.cell(dash, 0, 5, "POIs activos", text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 5, str.tostring(nAct) + " / " + str.tostring(maxPoi), text_color = C_TXT, text_size = size.tiny, text_halign = text.align_right)
+
+    table.cell(dash, 0, 6, "Mejor POI",    text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 6, best > 0 ? str.tostring(best) + "/10 " + starsOf(best) : "—", text_color = best > 0 ? (bestB ? colBull : colBear) : C_MUTE, text_size = size.tiny, text_halign = text.align_right)
+
+    table.cell(dash, 0, 7, "Liquidez",     text_color = C_MUTE, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(dash, 1, 7, eqhActive and eqlActive ? "EQH + EQL" : eqhActive ? "EQH arriba" : eqlActive ? "EQL abajo" : "—", text_color = eqhActive or eqlActive ? colInfo : C_MUTE, text_size = size.tiny, text_halign = text.align_right)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  11 · ALERTAS
+//  · alertcondition() → aparecen en el desplegable clásico de TradingView.
+//  · alert()          → mensajes dinámicos (score, confluencias, precios);
+//                       elige "Any alert() function call" al crear la alerta.
+// ═══════════════════════════════════════════════════════════════════════════════
+alertcondition(evNewBuy,  "Nuevo BUY POI",        "POI Finder PRO · Nuevo BUY POI detectado")
+alertcondition(evNewSell, "Nuevo SELL POI",       "POI Finder PRO · Nuevo SELL POI detectado")
+alertcondition(evEnter,   "Precio entrando en POI", "POI Finder PRO · El precio ha entrado en un POI")
+alertcondition(evMit,     "POI mitigado",         "POI Finder PRO · POI mitigado")
+alertcondition(evInv,     "POI invalidado",       "POI Finder PRO · POI invalidado")
